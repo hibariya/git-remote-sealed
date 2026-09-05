@@ -26,9 +26,26 @@ use crate::writer::{WriteError, WriterConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Info { remote: Option<String> },
-    Forget { yes: bool, remote: Option<String> },
-    Compact { remote: Option<String> },
+    Info {
+        remote: Option<String>,
+    },
+    Forget {
+        yes: bool,
+        remote: Option<String>,
+    },
+    Compact {
+        remote: Option<String>,
+    },
+    /// `--version` / `-V`. Prints the tool version AND the format version,
+    /// because "which helper is on this PATH" is a question about the
+    /// FORMAT first: a helper speaking version 1 against a version 2 vault
+    /// is a real failure mode, and the two version numbers move
+    /// independently.
+    Version,
+    /// `--help` / `-h`. Without this the flag falls through to git's
+    /// `<remote> <url>` form, is taken for a remote NAME, and the user gets
+    /// an error about age identities — an answer to a question nobody asked.
+    Help,
 }
 
 #[derive(Debug)]
@@ -92,7 +109,8 @@ impl From<WriteError> for CliError {
 pub const USAGE: &str = "usage: git-remote-sealed <remote> <url>            (invoked by git)\n\
        git-remote-sealed info [<remote-or-url>]\n\
        git-remote-sealed forget --yes [<remote-or-url>]\n\
-       git-remote-sealed compact [<remote-or-url>]";
+       git-remote-sealed compact [<remote-or-url>]\n\
+       git-remote-sealed --version | --help";
 
 /// Recognize a subcommand invocation. `None` = not a subcommand (git's
 /// `<remote> <url>` form). A remote literally named `info`, `forget`, or
@@ -129,6 +147,10 @@ pub fn parse_args(args: &[String]) -> Option<Result<Command, CliError>> {
             }),
             _ => Err(CliError::Usage(USAGE.into())),
         },
+        // Before the `<remote> <url>` fallthrough: git never invokes a
+        // remote helper with these, and a vault URL cannot look like one.
+        "--version" | "-V" if rest.is_empty() => Ok(Command::Version),
+        "--help" | "-h" if rest.is_empty() => Ok(Command::Help),
         _ => return None,
     };
     Some(cmd)
@@ -139,6 +161,16 @@ pub fn run(cmd: Command, out: &mut dyn Write) -> Result<(), CliError> {
         Command::Info { remote } => info(remote.as_deref(), out),
         Command::Forget { yes, remote } => forget(yes, remote.as_deref(), out),
         Command::Compact { remote } => run_compact(remote.as_deref(), out),
+        Command::Version => writeln!(
+            out,
+            "git-remote-sealed {} (sealed vault format {})",
+            env!("CARGO_PKG_VERSION"),
+            crate::FORMAT_VERSION
+        )
+        .map_err(|e| CliError::Io(e.to_string())),
+        // Asked for, so it is not an error: stdout and exit 0. A usage
+        // MISTAKE still goes to stderr and exits non-zero, via CliError.
+        Command::Help => writeln!(out, "{USAGE}").map_err(|e| CliError::Io(e.to_string())),
     }
 }
 
@@ -328,6 +360,41 @@ fn run_compact(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_and_help_are_commands_not_remote_names() {
+        // Without this, both fall through to git's `<remote> <url>` form,
+        // are read as a remote NAME, and answer with an error about age
+        // identities — the first thing a new user types, answered wrongly.
+        let mut out = Vec::new();
+        run(Command::Version, &mut out).expect("version");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+        // The FORMAT version is the load-bearing half: a helper speaking
+        // version 1 at a version 2 vault is a real failure mode.
+        assert!(
+            text.contains(&format!("format {}", crate::FORMAT_VERSION)),
+            "{text}"
+        );
+
+        for a in [["--version"], ["-V"]] {
+            assert!(
+                matches!(parse_args(&args(&a)), Some(Ok(Command::Version))),
+                "{a:?}"
+            );
+        }
+        for a in [["--help"], ["-h"]] {
+            assert!(
+                matches!(parse_args(&args(&a)), Some(Ok(Command::Help))),
+                "{a:?}"
+            );
+        }
+
+        // Only bare. `--version` with an argument is not a version request,
+        // and must not shadow a URL that happens to start with a dash.
+        assert!(parse_args(&args(&["--version", "x"])).is_none());
+        assert!(parse_args(&args(&["--help", "x"])).is_none());
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
