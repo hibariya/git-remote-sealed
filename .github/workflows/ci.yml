@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `git` is how the helper reads and writes repositories at all, and
+      # `age` is what tests/claims_e2e.rs runs FORMAT.md's Appendix A with —
+      # the recovery claim is only worth something if the STOCK binary
+      # proves it, not our embedded copy of the age crate.
+      - name: Install git and age
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git age
+
+      # Deliberately stable, not a pinned version. A pinned toolchain hides
+      # new lints: this crate shipped a clippy failure for weeks because the
+      # container pinned 1.94 and the lint arrived in 1.97. The cost is that
+      # a new Rust release can turn CI red without a code change; that is
+      # the direction worth failing in.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  model:
+    name: Formal model (fast lane)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - run: npm install -g @informalsystems/quint
+
+      # `quint verify` downloads the Apalache distribution on first use and
+      # `quint test` fetches the Rust evaluator. Cache both so the usual run
+      # needs no network, and warm them explicitly: a silent download
+      # failure would otherwise surface later as a confusing model error.
+      # Verified: quint puts both downloads under ~/.quint —
+      # apalache-dist-<ver>/ and rust-evaluator-v<ver>/. The key carries the
+      # quint version, since a quint upgrade wants different ones.
+      - name: Cache Apalache and the Quint evaluator
+        uses: actions/cache@v4
+        with:
+          path: ~/.quint
+          key: quint-${{ runner.os }}-${{ hashFiles('spec/warm.qnt') }}-v1
+      - name: Warm the engines
+        run: |
+          quint verify --max-steps=1 --invariant=inv spec/warm.qnt
+          quint test spec/warm.qnt
+
+      # The compute here is ~15s. What it buys: the scenario tests, and the
+      # two NEGATIVE CONTROLS, which must still FIND their attacks — an
+      # invariant that has quietly become unfalsifiable passes everything
+      # else in this job.
+      - name: Fast lane
+        working-directory: spec
+        run: |
+          quint typecheck sealed_v2.qnt
+          for m in neg_nopin neg_sfonly full honest neg_force; do
+            quint test --main=$m sealed_v2.qnt
+          done
+          for m in neg_nopin neg_sfonly; do
+            if quint verify --main=$m --invariant=inv_p3_neverReuse \
+                 --max-steps=6 sealed_v2.qnt; then
+              echo "FAIL: negative control $m found no violation"; exit 1
+            fi
+          done
+          quint run --main=full --invariant=inv_all_malicious \
+            --max-samples=10000 --max-steps=12 sealed_v2.qnt
+          quint run --main=honest --invariant=inv_all_honest \
+            --max-samples=10000 --max-steps=12 sealed_v2.qnt

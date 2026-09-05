@@ -1,0 +1,40 @@
+name: Absence proofs (deep)
+
+# The symbolic proofs, NOT on every push: they take hours and can wedge.
+# See spec/README.md, "Why these bounds", for the measured cost and the
+# depth currently claimed. Run this after changing the model or FORMAT.md's
+# protocol core, and update that README with what it reports.
+on:
+  workflow_dispatch:
+    inputs:
+      max_steps:
+        description: 'Proof depth (4 is ~40 min; 5 has run for hours)'
+        default: '4'
+
+jobs:
+  proof:
+    name: Apalache absence proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: npm install -g @informalsystems/quint
+      - name: Prove
+        working-directory: spec
+        env:
+          # Apalache runs out of the default heap on the deep configs and
+          # dies as an opaque exit-137; give it room so it fails with a Java
+          # OOM message instead.
+          JVM_ARGS: -Xmx4g
+        run: |
+          quint verify --main=full2 --invariant=inv_core_malicious \
+            --max-steps=${{ inputs.max_steps }} sealed_v2.qnt
+          quint verify --main=honest --invariant=inv_core_honest \
+            --max-steps=${{ inputs.max_steps }} sealed_v2.qnt
