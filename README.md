@@ -26,6 +26,9 @@ git push -u origin main
 
 Linux and macOS only for now.
 
+Prebuilt binaries cover Linux (x86_64, aarch64) and Apple Silicon. On an
+Intel Mac, build from source with `cargo install` below.
+
 ## Data Can be Recovered the Original Git History without this Tool
 
 The encrypted files are ordinary Git bundle files with some metadata. Even without this tool, you can decrypt the files and extract the repository history with `git` and `age` and your secret keys.

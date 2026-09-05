@@ -26,10 +26,12 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-13
           - target: aarch64-apple-darwin
             os: macos-latest
+          # No x86_64-apple-darwin. It needs `macos-13`, the last Intel
+          # runner image, which GitHub is winding down — a v0.1.0 attempt sat
+          # queued while every other target finished and attested. Intel Macs
+          # build from source: `cargo install --git <this repo>`.
           # No Windows target. The helper pins core.attributesFile and
           # core.hooksPath to /dev/null (src/vaultrepo.rs) and the tests run
           # /bin/sh, so it is unix-only as written. Shipping an untested
