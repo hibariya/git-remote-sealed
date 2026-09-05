@@ -1,17 +1,21 @@
 # git-remote-sealed
 
-Back up a git repository to a host that can read nothing.
+This is a git remote helper that encrypts the entire repository with [age](https://github.com/filosottile/age) in the remote host, while allowing the local clone decrypted.
 
 Your repository stays normal on your machine. The remote (the "vault")
-only ever stores encrypted files. The host — GitHub, any git server, or
-a plain folder — cannot see your files, file names, branch names, or
-history.
+only ever stores encrypted files. The host (GitHub, or any other git server) cannot see the files in the repository, file names, branch names, or history.
 
-```
-git clone sealed::git@github.com:you/my-vault.git notes
-cd notes
-# edit, commit ...
-git push
+## Getting Started
+
+Install the helper, and then add a remote with the `sealed::` prefix. Pushing to the remote will be handled by git-remote-sealed, and commits will be stored encrypted.
+
+```shell
+# install the helper
+cargo install --git https://github.com/hibariya/git-remote-sealed
+
+cd my-secret-repo
+git remote add origin sealed::git@github.com:you/my-secret-repo.git
+git push -u origin main
 ```
 
 ## Your data does not depend on this tool
@@ -32,13 +36,24 @@ cannot quietly stop working.
 ## Install
 
 You need `git` on PATH. Encryption is built in — no `age` binary needed.
+Linux and macOS only (see the release workflow for why).
+
+Download a build from the [releases
+page](https://github.com/hibariya/git-remote-sealed/releases), check it,
+and put it on your PATH:
+
+```
+shasum -a 256 -c SHA256SUMS --ignore-missing
+tar xzf git-remote-sealed-<target>.tar.gz
+install -m 0755 git-remote-sealed-<target>/git-remote-sealed ~/.local/bin/
+```
+
+The Linux builds are static, so they do not care how old the distribution
+is. Or build it yourself:
 
 ```
 cargo install --git https://github.com/hibariya/git-remote-sealed
 ```
-
-Or build it yourself: `cargo build --release`, then copy
-`target/release/git-remote-sealed` onto your PATH.
 
 ## Set up
 

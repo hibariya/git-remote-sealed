@@ -1,0 +1,109 @@
+name: Release
+
+# Tag a version to publish binaries:  git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is built against musl, STATICALLY: a gnu build carries the
+          # runner's glibc version as a floor, and the people most likely to
+          # want an encrypted backup remote are the ones on an old server.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # No Windows target. The helper pins core.attributesFile and
+          # core.hooksPath to /dev/null (src/vaultrepo.rs) and the tests run
+          # /bin/sh, so it is unix-only as written. Shipping an untested
+          # Windows binary for a tool that holds the only copy of a backup
+          # is not a trade worth making.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      # The tests need real git and age: tests/claims_e2e.rs runs FORMAT.md's
+      # Appendix A with the stock binaries. A binary is not published unless
+      # the suite passed on the machine that built it.
+      - name: Install git and age
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install age; else sudo apt-get install -y git age; fi
+        shell: bash
+
+      - run: cargo test --release --locked --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          bin=target/${{ matrix.target }}/release/git-remote-sealed
+          name=git-remote-sealed-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          cp "$bin" "dist/$name/"
+          cp README.md LICENSE docs/FORMAT.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          # Checksums are made HERE, on the machine that built the binary,
+          # so the file a user verifies is the file this job produced.
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Collect checksums
+        run: cd dist && cat *.sha256 > SHA256SUMS && rm -f *.sha256 && ls -la
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            Static Linux builds (musl) and macOS builds. Unix only — see the
+            workflow for why there is no Windows binary.
+
+            Verify before use:
+
+            ```
+            shasum -a 256 -c SHA256SUMS --ignore-missing
+            ```
+
+            Then put `git-remote-sealed` on your PATH. It needs `git`;
+            encryption is built in, so no `age` binary is required.
