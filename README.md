@@ -43,7 +43,11 @@ You need `git` and `age-keygen` on PATH.
 
 Download a build from the [releases page](https://github.com/hibariya/git-remote-sealed/releases), check it, and put it on your PATH:
 
-```
+```shell
+# proves the archive was built by this repo's release workflow, from a
+# known commit — a checksum only says it matches a list published beside it
+gh attestation verify git-remote-sealed-<target>.tar.gz --repo hibariya/git-remote-sealed
+
 shasum -a 256 -c SHA256SUMS --ignore-missing
 tar xzf git-remote-sealed-<target>.tar.gz
 install -m 0755 git-remote-sealed-<target>/git-remote-sealed ~/.local/bin/

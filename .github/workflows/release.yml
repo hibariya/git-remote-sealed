@@ -7,7 +7,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write      # create the release
+  id-token: write      # OIDC identity the attestation is signed with
+  attestations: write  # record the provenance
 
 jobs:
   build:
@@ -72,6 +74,15 @@ jobs:
           # so the file a user verifies is the file this job produced.
           ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
 
+      # Signed provenance, generated in the job that BUILT the archive, so
+      # it attests to this workflow at this commit rather than to whoever
+      # later assembled a release. A checksum file only says the bytes match
+      # a list published beside them; anyone who can write to the release can
+      # rewrite both. This says WHERE the bytes came from.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -89,7 +100,11 @@ jobs:
           merge-multiple: true
       - name: Collect checksums
         run: cd dist && cat *.sha256 > SHA256SUMS && rm -f *.sha256 && ls -la
+      # Only a tag cuts a release. A workflow_dispatch run therefore builds
+      # every target, runs their tests and attests them, and stops — a dry
+      # run of the whole matrix without publishing anything.
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             dist/*.tar.gz
@@ -99,9 +114,13 @@ jobs:
             Static Linux builds (musl) and macOS builds. Unix only — see the
             workflow for why there is no Windows binary.
 
-            Verify before use:
+            Verify before use. The attestation is the stronger check — it
+            proves the archive was built by this repository's release
+            workflow, from this commit:
 
             ```
+            gh attestation verify git-remote-sealed-<target>.tar.gz \
+              --repo hibariya/git-remote-sealed
             shasum -a 256 -c SHA256SUMS --ignore-missing
             ```
 
