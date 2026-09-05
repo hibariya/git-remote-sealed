@@ -564,8 +564,8 @@ generation — empty *bundle list* — is not an empty vault and is valid,
 
 **Notes to §7.4.** Background; nothing here adds a rule.
 
-**7d.** Version 1 made the twin check a SHOULD; version 2 requires it — the
-formal model's proofs assume it unconditionally.
+**7d.** The twin check is a MUST, not a SHOULD: the formal model's proofs
+assume it unconditionally.
 
 **7e.** Two kinds of own binding reach the memory, and neither can lose
 objects the way an unapplied manifest binding could. The bundle a write
@@ -960,35 +960,21 @@ two different vaults — both possibly your own — and would recover the
 wrong one. For a routine recovery from your own storage, the simple
 recipe is almost always what you want.
 
-**Old-tool symptom.** A version-1 tool refusing this vault with
-"unsupported vault format '2'" — or, if the host misreports
-`sealed-format`, with a malformed-manifest error — simply predates
-version 2: update the tool; this is not tampering.
-
 ## Appendix B. Version history
 
-- **1** (2026-08-08): initial version, with same-day errata from four
-  review rounds. SHA-1 repositories, bundle v2, age v1, eight-digit
-  zero-padded sequences, two-digit chunks, `refs.age` manifest
-  (format/vault/counter/bundle/refs lines, ignore-unknown rule, TOFU
-  pinning), compare-and-swap orphan-commit compaction. Amended twice on
-  2026-08-11 (chunk suffix width 2→3; single writer width), plus a
-  prose clarity pass, and a 2026-08-19 erratum removing a
-  sender-authentication overclaim (§10's current wording).
-- **2** (2026-09-02): object formats `sha1`+`sha256` via the
-  `objectformat` line with strict bundle-version mapping; sequence and
-  chunk numbers unpadded and value-bounded, apply order defined
-  numerically, canonical-form (no leading zeros) required with the
-  read-tolerant/write-strict rule for near-miss names; chunk counts
-  recorded on `bundle` lines and the expected-file-set rule (§6.7);
-  `seqfloor` line; `-full` rekeyed to bundle-list emptiness; zero-ref
-  compaction (manifest-only generations); the pin extended with
-  format/objectformat/seqfloor monotonicity and the normative
-  **sequence memory** (seq→digest, read- and write-side) — the last
-  found by the formal model, which this version adds as the normative
-  companion for the protocol core (§2); the manifest renamed from
-  `refs.age` to `sealed-manifest.age`. Not compatible with version-1
-  readers or writers; version-1 vaults are not valid version-2 vaults.
+- **2** (2026-09-02): the first published version. SHA-1 and SHA-256
+  source repositories via the `objectformat` line, with strict
+  bundle-version mapping; unpadded, value-bounded sequence and chunk
+  numbers, apply order defined numerically, canonical form (no leading
+  zeros) required, with the read-tolerant/write-strict rule for near-miss
+  names; chunk counts on `bundle` lines and the expected-file-set rule
+  (§6.7); the `seqfloor` line; `-full` keyed to bundle-list emptiness;
+  zero-ref compaction (manifest-only generations); trust-on-first-use
+  pinning of vault identity, counter, manifest-ciphertext digest, format,
+  objectformat and `seqfloor`, plus the normative **sequence memory**
+  (seq→digest, read- and write-side) — the last found by the formal
+  model, which this version carries as the normative companion for the
+  protocol core (§2).
 - **Errata** (2026-09-04), from an adversarial review of the changes made
   after the previous one: §7.4's
   persist-after-apply rule contradicted §8.4's burn rule, which confirms

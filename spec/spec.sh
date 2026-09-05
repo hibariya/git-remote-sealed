@@ -78,8 +78,10 @@ export JVM_ARGS
 
 echo
 echo "== absence proofs at depth $DEPTH (this is the slow part) =="
-echo "   depth 4 measured at ~40 min; depth 5 has run for hours without"
-echo "   finishing. README.md, 'Why these bounds', has the numbers."
+echo "   depth 4 measured at ~40 min; depth 5 has twice run for 7-9 hours"
+echo "   without finishing. README.md, 'Why these bounds', has the numbers."
+echo "   A pass prints Apalache's 'The outcome is: NoError' — trust that"
+echo "   line, not the exit status."
 quint verify --main=full2 --invariant=inv_core_malicious \
     --max-steps="$DEPTH" sealed_v2.qnt
 quint verify --main=honest --invariant=inv_core_honest \

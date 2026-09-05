@@ -104,7 +104,8 @@ podman compose run --rm check      # fmt, clippy, and every test
 To verify the Quint specs, run:
 
 ```shell
-
+podman compose run --rm spec # fast lane
+podman compose run --rm spec-full # absence proofs (40min .. hours)
 ```
 
 ## Future works

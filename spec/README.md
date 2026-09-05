@@ -1,8 +1,8 @@
 # Formal model — sealed vault format v2 (Quint / Apalache)
 
 A machine-checked model of the v2 steady-state protocol:
-`sealed_v2.qnt`. The scope is the format's steady state — v2 only, no
-migration, devices pinned from genesis — against the adversary
+`sealed_v2.qnt`. The scope is the format's steady state — devices pinned
+from genesis — against the adversary
 `docs/FORMAT.md` §1 and §10 describe. This README maps the
 model to that spec and records what the model has found.
 
@@ -30,7 +30,7 @@ forge or open ciphertexts. Devices are established (pinned from genesis)
 and run the v2 acceptance battery on every read. Writer actions: bundle
 push, manifest-only push, two-phase compaction (observe, then
 compare-and-swap commit), crash between acknowledged push and pin update
-(the T9 lag window). Migration is out of scope (owner decision).
+(the T9 lag window).
 
 ## Configurations
 
@@ -66,13 +66,19 @@ Measured on the same machine:
 | model | depth 4 | depth 5 |
 |---|---|---|
 | weakened P3 (`admitted`), before | not measured | ~3.5h |
-| unweakened P3 | **39 min, NoError** | being measured |
+| unweakened P3 | **39 min, NoError** | ≥7h32m, no result |
 
-A first attempt at depth 5 ran 9h15m without completing, with
-`forgetOwn` written as a fold of set filters; it is now a single filter
-with an `exists` (identical set, far less nesting), which is what the
-depth-4 figure above is for. Until a depth-5 run lands, the proved depth
-for `full2` is **4**. So the claims are, precisely:
+Depth 5 has been attempted twice on a 20-core laptop and completed
+neither time: 9h15m with `forgetOwn` written as a fold of set filters,
+then 7h32m after rewriting it as a single filter (identical set, far less
+nesting — that rewrite is what the depth-4 figure is for). Neither run
+printed an outcome; both were abandoned. Note that the second was killed
+rather than failing, and its wrapper reported exit 0 — the only reliable
+signal is Apalache's own `The outcome is: NoError` line, so check for
+that rather than the exit status.
+
+The proved depth for `full2` is therefore **4**. So the claims are,
+precisely:
 
 - **Proved (Apalache): P2/P3/P5 hold for two devices up to 4 steps
   under the full adversary; P4 likewise for the honest host at 5.**
@@ -142,7 +148,7 @@ passing `--depth` to `spec.sh`; nothing else changes.
   made formal.
 - **P7** — canonical representation is grammar-level, not temporal; it is
   enforced in the spec text (read-tolerant / write-strict) and does not
-  appear in this state model. (P6 was withdrawn with migration.)
+  appear in this state model.
 
 ## THE FINDING (2026-08-24): plan rev 2's pin set does not deliver P3
 
