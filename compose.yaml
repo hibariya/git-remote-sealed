@@ -1,8 +1,12 @@
-# Rust toolchain in a container, so a checkout needs no host cargo
-# (same pattern as spec/).
+# Both toolchains in containers, so a checkout needs no host cargo, node or
+# JVM. Two images on purpose: the crate needs rust, the model needs node +
+# a JVM, and one image carrying all three would be large and slow to build.
 #
-#   podman compose run --rm check      # fmt + clippy + tests, the whole gate
-#   podman compose run --rm shell      # poke at the crate by hand
+#   podman compose run --rm check       # fmt + clippy + tests
+#   podman compose run --rm spec        # the model, fast lane (~15s)
+#   podman compose run --rm spec-full   # + absence proofs (40min .. hours)
+#   podman compose run --rm shell       # poke at the crate by hand
+#   podman compose run --rm spec-shell  # poke at the model by hand
 services:
   shell: &rust
     build:
@@ -20,6 +24,28 @@ services:
   check:
     <<: *rust
     command: /repo/check.sh
+
+  spec-shell: &quint
+    build:
+      context: .
+      dockerfile: spec/Dockerfile
+    working_dir: /repo
+    volumes:
+      - .:/repo:z
+    environment:
+      # Apalache runs out of the default JVM heap on the deep configurations
+      # and dies as an opaque exit-137; give it room so a real exhaustion
+      # arrives as a Java OOM message instead.
+      JVM_ARGS: -Xmx4g
+    command: bash
+
+  spec:
+    <<: *quint
+    command: /repo/spec/spec.sh
+
+  spec-full:
+    <<: *quint
+    command: /repo/spec/spec.sh --full
 
 volumes:
   cargo-registry:

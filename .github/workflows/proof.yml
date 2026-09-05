@@ -26,15 +26,7 @@ jobs:
           distribution: temurin
           java-version: '21'
       - run: npm install -g @informalsystems/quint
+      # spec.sh runs the fast lane first, so a proof never runs against a
+      # model whose scenario tests or negative controls are already broken.
       - name: Prove
-        working-directory: spec
-        env:
-          # Apalache runs out of the default heap on the deep configs and
-          # dies as an opaque exit-137; give it room so it fails with a Java
-          # OOM message instead.
-          JVM_ARGS: -Xmx4g
-        run: |
-          quint verify --main=full2 --invariant=inv_core_malicious \
-            --max-steps=${{ inputs.max_steps }} sealed_v2.qnt
-          quint verify --main=honest --invariant=inv_core_honest \
-            --max-steps=${{ inputs.max_steps }} sealed_v2.qnt
+        run: ./spec/spec.sh --full --depth ${{ inputs.max_steps }}

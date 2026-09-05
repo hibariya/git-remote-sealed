@@ -73,24 +73,9 @@ jobs:
           quint verify --max-steps=1 --invariant=inv spec/warm.qnt
           quint test spec/warm.qnt
 
-      # The compute here is ~15s. What it buys: the scenario tests, and the
-      # two NEGATIVE CONTROLS, which must still FIND their attacks — an
-      # invariant that has quietly become unfalsifiable passes everything
-      # else in this job.
+      # The same script the container and a developer run — inlining the
+      # commands here is how CI and local checking drift apart. ~15s of
+      # compute; what it buys is the scenario tests and the two negative
+      # controls, which must still FIND their attacks.
       - name: Fast lane
-        working-directory: spec
-        run: |
-          quint typecheck sealed_v2.qnt
-          for m in neg_nopin neg_sfonly full honest neg_force; do
-            quint test --main=$m sealed_v2.qnt
-          done
-          for m in neg_nopin neg_sfonly; do
-            if quint verify --main=$m --invariant=inv_p3_neverReuse \
-                 --max-steps=6 sealed_v2.qnt; then
-              echo "FAIL: negative control $m found no violation"; exit 1
-            fi
-          done
-          quint run --main=full --invariant=inv_all_malicious \
-            --max-samples=10000 --max-steps=12 sealed_v2.qnt
-          quint run --main=honest --invariant=inv_all_honest \
-            --max-samples=10000 --max-steps=12 sealed_v2.qnt
+        run: ./spec/spec.sh

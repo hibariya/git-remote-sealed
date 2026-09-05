@@ -107,6 +107,10 @@ To verify the Quint specs, run:
 
 ```
 
+## Future works
+
+- Post-quantum key support
+
 ## License
 
 [MIT](LICENSE)

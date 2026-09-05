@@ -6,13 +6,20 @@ migration, devices pinned from genesis — against the adversary
 `docs/FORMAT.md` §1 and §10 describe. This README maps the
 model to that spec and records what the model has found.
 
-Run everything (podman, no host toolchain):
+Run it:
 
 ```sh
-./scripts/model-check.sh
+./spec/spec.sh                      # fast lane: ~15s of compute
+./spec/spec.sh --full               # + the absence proofs
+
+podman compose run --rm spec        # the same, needing no host toolchain
+podman compose run --rm spec-full
 ```
 
-Design-time, minutes-long — deliberately not part of `gate.sh`.
+`spec.sh` is the only definition of what checking the model means — CI
+calls it too. The fast lane runs on every push; `--full` adds the symbolic
+absence proofs, which take from ~40 minutes upward (see "Why these
+bounds") and stay manual.
 
 ## What is modeled
 
@@ -36,7 +43,8 @@ compare-and-swap commit), crash between acknowledged push and pin update
 | `honest` | full | honest git | P4 (CAS durability) proved at depth 5 + simulation |
 | `neg_force` | full | honest, force-push compact | negative control: §8's CAS rule is load-bearing |
 
-Negative controls run FIRST (`check.sh`) and double as calibration: the
+Negative controls run before the proofs (`spec.sh`) and double as
+calibration: the
 scripted violations are exactly 6 steps, and the verifier demonstrably
 finds them at depth 6 in seconds. The absence proofs run below the
 deepest known attack (6 steps), so the 6-step attack class is covered by
@@ -77,7 +85,7 @@ for `full2` is **4**. So the claims are, precisely:
   intractable, so it lives in the simulation stage only.
 
 A machine with more patience than a laptop can raise the proof depth by
-editing two `--max-steps` values in `check.sh`; nothing else changes.
+passing `--depth` to `spec.sh`; nothing else changes.
 
 ## Properties
 
