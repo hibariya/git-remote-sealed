@@ -365,6 +365,31 @@ fn skipped_bundles_are_reapplied_when_objects_went_missing() {
 }
 
 #[test]
+fn new_incremental_restores_pruned_cached_prerequisites() {
+    let fx = fixture("reapply-prerequisite", ObjectFormat::Sha1, Some(2), false);
+    fx.remote
+        .commit(&fx.with_manifest(&fx.gen1, &fx.manifest_gen1()), "main");
+    let dest = SourceRepo::init(fx.scratch.join("dest"), "sha1");
+    let git_dir = fs::canonicalize(dest.dir.join(".git")).expect("git dir");
+    let ids = std::slice::from_ref(&fx.identity);
+    let vault = VaultRepo::open(&git_dir, &fx.remote.url()).expect("open");
+    reader::fetch_and_report(&vault, &git_dir, ids).expect("first read");
+
+    // Unbundle imports objects without refs, as happens for unselected
+    // branches in a single-branch clone. GC can remove these objects.
+    git(&dest.dir, &["gc", "-q", "--prune=now"]);
+    assert!(!vaultrepo::object_exists(&git_dir, &fx.c1).expect("cat-file"));
+    fx.remote
+        .commit(&fx.with_manifest(&fx.gen2, &fx.manifest_gen2()), "main");
+
+    let out = reader::fetch_and_report(&vault, &git_dir, ids).expect("incremental after gc");
+    assert_eq!(out.refs["refs/heads/main"], fx.c2);
+    assert!(vaultrepo::object_exists(&git_dir, &fx.c1).expect("prerequisite restored"));
+    assert!(vaultrepo::object_exists(&git_dir, &fx.c2).expect("new commit imported"));
+    git(&dest.dir, &["fsck", "--strict"]);
+}
+
+#[test]
 fn hint_version_mismatch_is_refused() {
     // §3: a host-controlled `sealed-format` that disagrees fast-fails; it
     // never selects semantics (the manifest is still a valid v2 one).

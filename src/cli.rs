@@ -295,7 +295,9 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
     text.push_str(
         "            On a new device, after it has its own identity, run there:\n\
          \x20             git config sealed.recipients \"<the join line above>\"\n\
-         \x20           then add the new device's recipient to sealed.recipients here.\n",
+         \x20           then add the new device's recipient to sealed.recipients here\n\
+         \x20           and run `git-remote-sealed compact` here before cloning there.\n\
+         \x20           Compaction encrypts the existing history to the new key too.\n",
     );
     out.write_all(text.as_bytes())
         .map_err(|e| CliError::Io(e.to_string()))

@@ -352,7 +352,20 @@ pub fn apply(
         if remembered {
             skipped.push(*seq);
         } else {
-            apply_one(vault, tree, m, *seq, &scratch, dest_git_dir, identities)?;
+            match apply_one(vault, tree, m, *seq, &scratch, dest_git_dir, identities) {
+                Err(ReadError::Git(GitError::Command { what, .. }))
+                    if what == "bundle verify" && !skipped.is_empty() =>
+                {
+                    // A new incremental can need objects GC removed from
+                    // an earlier, cached bundle. Restore its predecessors
+                    // before retrying; the final ref-tip check is too late.
+                    for prior in skipped.drain(..) {
+                        apply_one(vault, tree, m, prior, &scratch, dest_git_dir, identities)?;
+                    }
+                    apply_one(vault, tree, m, *seq, &scratch, dest_git_dir, identities)?;
+                }
+                result => result?,
+            }
         }
     }
 

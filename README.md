@@ -78,6 +78,11 @@ git config --add sealed.recipients age1...   # the other key's PUBLIC half
 git config --show-origin --get-all sealed.recipients
 ```
 
+When adding a recipient to an existing vault, run `git-remote-sealed compact`
+on a device that can read its history before cloning with the new key.
+A normal push encrypts only new files to the added recipient; old bundles
+remain unreadable to that key until compaction.
+
 ## More commands
 
 - `git-remote-sealed info` — shows your vault setup, and the steps to add a new device (keys never move between devices).
