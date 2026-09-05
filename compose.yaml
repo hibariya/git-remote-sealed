@@ -1,0 +1,26 @@
+# Rust toolchain in a container, so a checkout needs no host cargo
+# (same pattern as spec/).
+#
+#   podman compose run --rm check      # fmt + clippy + tests, the whole gate
+#   podman compose run --rm shell      # poke at the crate by hand
+services:
+  shell: &rust
+    build:
+      context: .
+    working_dir: /repo
+    volumes:
+      # `:z` for SELinux distros.
+      - .:/repo:z
+      # Cache crates and build artifacts across runs; keeps target/ out of
+      # the host tree entirely.
+      - cargo-registry:/usr/local/cargo/registry
+      - target:/repo/target
+    command: bash
+
+  check:
+    <<: *rust
+    command: /repo/check.sh
+
+volumes:
+  cargo-registry:
+  target:

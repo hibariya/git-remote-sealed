@@ -1,0 +1,22 @@
+[package]
+name = "git-remote-sealed"
+version = "0.0.1"
+edition = "2021"
+description = "An end-to-end encrypted git remote: back up a repository to a host that can read nothing"
+license = "MIT"
+repository = "https://github.com/hibariya/git-remote-sealed"
+
+[lib]
+name = "sealed"
+path = "src/lib.rs"
+
+[[bin]]
+name = "git-remote-sealed"
+path = "src/main.rs"
+
+# Deliberately minimal (see README.md): age for encryption (embedded, no age
+# binary), sha2 for digests, std for everything else; git is invoked as a
+# subprocess, never linked.
+[dependencies]
+age = "=0.11.5"
+sha2 = "=0.10.9"
