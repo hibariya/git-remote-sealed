@@ -22,6 +22,10 @@ git remote add origin sealed::git@github.com:me/my-secret-repo.git
 git push -u origin main
 ```
 
+## Platforms
+
+Linux and macOS only for now.
+
 ## Data Can be Recovered the Original Git History without this Tool
 
 The encrypted files are ordinary Git bundle files with some metadata. Even without this tool, you can decrypt the files and extract the repository history with `git` and `age` and your secret keys.
@@ -33,9 +37,9 @@ git clone --bare full.bundle recovered.git
 
 The full recovery steps are in [docs/FORMAT.md](docs/FORMAT.md), Appendix A.
 
-## Install
+## Installation
 
-You need `git` on PATH.
+You need `git` and `age-keygen` on PATH.
 
 Download a build from the [releases page](https://github.com/hibariya/git-remote-sealed/releases), check it, and put it on your PATH:
 
@@ -53,20 +57,7 @@ Alternatively, build it yourself:
 cargo install --git https://github.com/hibariya/git-remote-sealed
 ```
 
-## Set up
-
-```shell
-age-keygen -o key.txt        # keep this file safe: losing it loses the vault
-git config sealed.identity /path/to/key.txt
-```
-
-Make an empty repo on your host, then use it with the `sealed::` prefix:
-
-```shell
-git clone sealed::git@github.com:me/my-vault.git
-```
-
-Push, pull, and clone work as usual after that.
+## Additional Age Encryption Recipients
 
 Encrypt to more than one key if the vault matters (one of them an offline recovery key you keep somewhere else):
 
@@ -111,6 +102,7 @@ podman compose run --rm spec-full # absence proofs (40min .. hours)
 ## Future works
 
 - Post-quantum key support
+- Support more platforms
 
 ## License
 
