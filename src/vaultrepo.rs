@@ -9,6 +9,7 @@
 //! FORMAT.md's design (§1 goal 1: recoverable with stock tools; this
 //! implementation exercises the same stock surface).
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -16,7 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::sha256_hex;
+use crate::pinstore::{Pin, PinError, PinStore};
 
 /// §8 writer hygiene: fixed author/committer and a fixed timestamp (the
 /// Unix epoch, UTC) on every vault commit. Set as environment for every git
@@ -140,63 +141,90 @@ pub enum PushOutcome {
     Indeterminate(String),
 }
 
-/// One vault remote plus this repository's local state for it: bare mirror,
-/// pin directory, scratch space, and the §6.1 lock — all under
-/// `<GIT_DIR>/sealed/<sha256-of-remote-url>/`.
+/// One vault remote plus this repository's local state for it: the bare
+/// mirror and scratch space under `<GIT_DIR>/sealed/urls/<sha256-of-url>/`,
+/// the pins (`PinStore`, shared by every URL of a vault), and the §6.1
+/// lock — ONE lock for the whole repository, at `<GIT_DIR>/sealed/lock`.
+/// Two URLs of one vault share a pin, so operations through different URLs
+/// must be serialized against each other too; one lock does that with no
+/// lock order to get wrong.
 pub struct VaultRepo {
     url: String,
     base: PathBuf,
     mirror: PathBuf,
-    /// §6.1: concurrent operations sharing one local mirror MUST be
-    /// serialized. Held (OS advisory lock) for this value's whole lifetime;
-    /// released when the file is dropped.
+    pins: PinStore,
+    /// `pins()` migrates 0.1.0 state once per handle.
+    migrated: Cell<bool>,
+    /// Held (OS advisory lock) for this value's whole lifetime; released
+    /// when the file is dropped.
     _lock: fs::File,
 }
 
-/// Where the state for `(local repository, remote url)` lives. Keyed by the
-/// *URL*, not the manifest's vault id: the pin directory must be stable
-/// across whole-vault substitution, or §7.4's identity check could be
-/// laundered away by the substitute starting a fresh pin (see pinstore.rs).
-pub fn state_dir(git_dir: &Path, url: &str) -> PathBuf {
-    git_dir.join("sealed").join(sha256_hex(url.as_bytes()))
+/// `<GIT_DIR>/sealed` — the root of every piece of local vault state.
+pub fn sealed_root(git_dir: &Path) -> PathBuf {
+    git_dir.join("sealed")
 }
 
-/// The pin directory for a (repository, remote) pair, without opening the
-/// vault. `info` reports the pin and must not take the §6.1 lock or touch
-/// the network to do it.
-pub fn pin_dir_for(git_dir: &Path, url: &str) -> PathBuf {
-    state_dir(git_dir, url).join("pin")
+/// Where the per-URL state for `(local repository, remote url)` lives:
+/// mirror, scratch space, and the URL's vault binding. Keyed by the URL
+/// spelling; the pin itself is keyed by vault identity (pinstore.rs).
+pub fn state_dir(git_dir: &Path, url: &str) -> PathBuf {
+    PinStore::new(&sealed_root(git_dir)).url_dir(url)
 }
 
 impl VaultRepo {
     /// Open (creating if needed) the local state for this remote and take
     /// the §6.1 lock. Blocks until the lock is available.
     pub fn open(git_dir: &Path, url: &str) -> Result<VaultRepo, GitError> {
-        let base = state_dir(git_dir, url);
+        let root = sealed_root(git_dir);
         // A durable pin is useless if its newly created ancestors vanish
         // after power loss. Save the state-directory entries first.
-        crate::durable::create_dir_all(&base)
-            .map_err(|e| GitError::Io(format!("{}: {e}", base.display())))?;
+        crate::durable::create_dir_all(&root)
+            .map_err(|e| GitError::Io(format!("{}: {e}", root.display())))?;
 
-        let lock_path = base.join("lock");
+        let lock_path = root.join("lock");
         let lock = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&lock_path)
             .map_err(|e| GitError::Io(format!("{}: {e}", lock_path.display())))?;
-        // §6.1: serialize all operations on one mirror. One lock per state
-        // dir also serializes the pin file and scratch space that live here.
+        // §6.1: serialize every operation of this repository, whichever URL
+        // it goes through — the pin they share lives here too.
         lock.lock()
             .map_err(|e| GitError::Io(format!("{}: {e}", lock_path.display())))?;
 
+        let pins = PinStore::new(&root);
+        let base = pins.url_dir(url);
+        crate::durable::create_dir_all(&base)
+            .map_err(|e| GitError::Io(format!("{}: {e}", base.display())))?;
         let mirror = base.join("mirror.git");
         Ok(VaultRepo {
             url: url.to_owned(),
             base,
             mirror,
+            pins,
+            migrated: Cell::new(false),
             _lock: lock,
         })
+    }
+
+    /// This repository's pins, with any 0.1.0 per-URL state migrated first
+    /// (under the lock this handle holds). A migration that finds
+    /// contradicting records fails here, on every operation, until the
+    /// user resolves it (`PinError::Incompatible`).
+    pub fn pins(&self) -> Result<&PinStore, PinError> {
+        if !self.migrated.get() {
+            self.pins.migrate_legacy()?;
+            self.migrated.set(true);
+        }
+        Ok(&self.pins)
+    }
+
+    /// Persist `pin` as the shared pin of its vault, binding this URL to
+    /// that vault first (§7.4).
+    pub fn save_pin(&self, pin: &Pin) -> Result<(), PinError> {
+        self.pins()?.save(&self.url, pin)
     }
 
     /// Create the bare mirror on first use. §3: the vault repository is
@@ -258,28 +286,14 @@ impl VaultRepo {
         &self.url
     }
 
-    /// `<GIT_DIR>/sealed/<hash>` — the whole state directory (§7.5 `forget`
-    /// removes it).
+    /// `<GIT_DIR>/sealed/urls/<hash>` — this URL's state directory (§7.5
+    /// `forget` removes it).
     pub fn state_dir(&self) -> &Path {
         &self.base
     }
 
-    /// The directory pinstore should use for this (repository, remote) pair.
-    pub fn pin_dir(&self) -> PathBuf {
-        self.base.join("pin")
-    }
-
-    /// `<GIT_DIR>/sealed` — every remote's state dir lives here; §7.4's
-    /// per-vault pin lookup scans it (`pinstore::find_by_vault_id`).
-    pub fn sealed_root(&self) -> PathBuf {
-        self.base
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.base.clone())
-    }
-
-    /// Scratch space for reassembly/decryption temp files. Lives under the
-    /// locked state dir, so the §6.1 lock covers it too.
+    /// Scratch space for reassembly/decryption temp files. Per URL, under
+    /// the repository lock like everything else here.
     pub fn scratch_dir(&self) -> Result<PathBuf, GitError> {
         let dir = self.base.join("scratch");
         fs::create_dir_all(&dir).map_err(|e| GitError::Io(format!("{}: {e}", dir.display())))?;

@@ -4,9 +4,12 @@
 //! - `info [<remote-or-url>]` — read-only, offline: the vault URL, the
 //!   identity file, this device's recipient(s), the extras from
 //!   `sealed.recipients`, and the join line for a new device;
-//! - `forget --yes [<remote-or-url>]` — §7.5: discard this repository's pin,
-//!   sequence memory, and mirror for that remote. Without `--yes` it prints
-//!   the warning (forgetting under attack accepts the attack) and refuses;
+//! - `forget --yes [<remote-or-url>]` — §7.5: discard this repository's
+//!   mirror and vault binding for that remote, and the vault's pin and
+//!   sequence memory unless another remote URL of this repository is still
+//!   bound to the same vault (the pin is shared per vault, §7.4). Without
+//!   `--yes` it prints the warning (forgetting under attack accepts the
+//!   attack) and refuses;
 //! - `compact [<remote-or-url>]` — §9.
 //!
 //! A remote is named by its git remote name (resolved with `git remote
@@ -19,9 +22,10 @@ use std::path::Path;
 
 use crate::compact;
 use crate::helper::strip_scheme;
+use crate::pinstore::{PinError, PinStore};
 use crate::settings::{Settings, SettingsError};
 use crate::srcrepo;
-use crate::vaultrepo::{GitError, VaultRepo};
+use crate::vaultrepo::{self, GitError, VaultRepo};
 use crate::writer::{WriteError, WriterConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +58,7 @@ pub enum CliError {
     Settings(SettingsError),
     Git(GitError),
     Write(WriteError),
+    Pin(PinError),
     /// No (or more than one) `sealed::` remote to pick, or the argument
     /// names neither a remote nor a `sealed::` URL.
     NoSealedRemote(String),
@@ -71,6 +76,7 @@ impl fmt::Display for CliError {
             CliError::Settings(e) => write!(f, "{e}"),
             CliError::Git(e) => write!(f, "{e}"),
             CliError::Write(e) => write!(f, "{e}"),
+            CliError::Pin(e) => write!(f, "{e}"),
             CliError::NoSealedRemote(e) => write!(f, "{e}"),
             CliError::ForgetRefused { remote } => write!(
                 f,
@@ -103,6 +109,11 @@ impl From<GitError> for CliError {
 impl From<WriteError> for CliError {
     fn from(e: WriteError) -> Self {
         CliError::Write(e)
+    }
+}
+impl From<PinError> for CliError {
+    fn from(e: PinError) -> Self {
+        CliError::Pin(e)
     }
 }
 
@@ -260,9 +271,23 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
     // a reference value to compare AGAINST, which is what this prints. Read
     // straight from the pin file: no network, no identity, no lock, so `info`
     // still works on a vault this device cannot currently reach.
-    match crate::pinstore::load(&crate::vaultrepo::pin_dir_for(&settings.git_dir, &url)) {
+    let pins = PinStore::new(&vaultrepo::sealed_root(&settings.git_dir));
+    match pins.load_for_url(&url) {
         Ok(Some(pin)) => {
             text.push_str(&format!("vault id:   {}\n", pin.vault_id));
+            // The pin is per vault: every other URL bound to it shares it.
+            let others: Vec<String> = pins
+                .urls_of_vault(&pin.vault_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|u| *u != url)
+                .collect();
+            if !others.is_empty() {
+                text.push_str(&format!(
+                    "shared:     pin also used through {}\n",
+                    others.join(", ")
+                ));
+            }
             text.push_str(&format!(
                 "pinned:     counter {}, seqfloor {}, format {}, objectformat {}\n",
                 pin.counter,
@@ -312,25 +337,44 @@ fn forget(yes: bool, remote: Option<&str>, out: &mut dyn Write) -> Result<(), Cl
     // Take the §6.1 lock first so no concurrent operation is mid-write.
     let vault = VaultRepo::open(&git_dir, &url)?;
     let state = vault.state_dir().to_path_buf();
-    for sub in ["pin", "mirror.git", "scratch"] {
-        let path = state.join(sub);
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(CliError::Io(format!("{}: {e}", path.display()))),
-        }
-    }
+    // Forget BEFORE migrating 0.1.0 records, never through the migration:
+    // the record the user distrusts may be the one that already merged,
+    // or the one that could not — either way it goes now, unmerged, and
+    // a migration that failed on it can succeed afterwards.
+    let pins = PinStore::new(&vaultrepo::sealed_root(&git_dir));
+    pins.discard_legacy(&url)?;
+    let forgotten = pins.forget_url(&url)?;
+    let migration = pins.migrate_legacy();
     drop(vault);
-    // The directory (and its lock file) may be held by a waiter; best effort.
-    let _ = std::fs::remove_dir_all(&state);
-    writeln!(
-        out,
-        "forgot the pin, sequence memory, and mirror for {label}\n\
-         ({}).\n\
-         Rollback, fork, and substitution protection for this vault is gone until the\n\
-         next successful read re-establishes it.",
-        state.display()
-    )
+    if let Err(e) = migration {
+        writeln!(out, "note: {e}").map_err(|e| CliError::Io(e.to_string()))?;
+    }
+    match (&forgotten.vault_id, forgotten.pin_removed) {
+        (Some(vault_id), true) => writeln!(
+            out,
+            "forgot the pin, sequence memory, and mirror for {label}\n\
+             (vault {vault_id}, {}).\n\
+             Rollback, fork, and substitution protection for this vault is gone until the\n\
+             next successful read re-establishes it.",
+            state.display()
+        ),
+        (Some(vault_id), false) => writeln!(
+            out,
+            "forgot the mirror and the vault binding for {label}\n\
+             ({}).\n\
+             The pin and sequence memory for vault {vault_id} are KEPT: this repository\n\
+             still reaches that vault through {}.\n\
+             They protect every URL of the vault; forget those URLs too only if the vault\n\
+             was deliberately re-created.",
+            state.display(),
+            forgotten.kept_for.join(", ")
+        ),
+        (None, _) => writeln!(
+            out,
+            "forgot the mirror for {label} ({}); this repository held no pin for it.",
+            state.display()
+        ),
+    }
     .map_err(|e| CliError::Io(e.to_string()))
 }
 

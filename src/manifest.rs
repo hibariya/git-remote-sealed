@@ -248,10 +248,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
                 // §7.2: random identity, at least 128 bits, shown as hex.
                 // Documented choices: lowercase hex only, even length (it
                 // names a byte string).
-                let ok = toks.len() == 2
-                    && toks[1].len() >= 32
-                    && toks[1].len().is_multiple_of(2)
-                    && is_lower_hex(toks[1]);
+                let ok = toks.len() == 2 && is_vault_id(toks[1]);
                 if !ok {
                     return Err(ManifestError::BadLine {
                         line_no,
@@ -574,6 +571,13 @@ pub fn verify_bundle_header(plaintext: &[u8], of: ObjectFormat) -> Result<(), Ma
         }
     }
     Ok(())
+}
+
+/// §7.2's `vault` grammar: lowercase hex, an even number of digits, at
+/// least 32 of them. Shared with the pin store, which keys directories by
+/// vault identity and must not accept anything else as a path component.
+pub(crate) fn is_vault_id(s: &str) -> bool {
+    s.len() >= 32 && s.len().is_multiple_of(2) && is_lower_hex(s)
 }
 
 fn is_lower_hex(s: &str) -> bool {

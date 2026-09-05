@@ -32,21 +32,34 @@ push, manifest-only push, two-phase compaction (observe, then
 compare-and-swap commit), crash between acknowledged push and pin update
 (the T9 lag window).
 
+**URL aliases.** A device reaches the vault through one of `ALIASES` —
+spellings of the remote URL that the host serves identically. Where a
+device keeps its pin is a *slot*: `(device, alias)` with one pin per
+URL, or `(device, "*")` with the one pin per vault that FORMAT.md §7.4
+requires (`SHARED_PIN`). Every read, push and compaction names the
+alias it goes through and consults that slot's pin and memory. P3's
+witness (`trusted`) stays per DEVICE: however many URLs it uses, one
+local repository holds the objects — so two slots that disagree are one
+device contradicting itself, and P3 is what catches it. The URL →
+vault-identity binding of §7.4 is not modeled: the model has one vault,
+and substitution is a format-level (identity) check, not a protocol one.
+
 ## Configurations
 
 | Module | Pins | Host | Purpose |
 |---|---|---|---|
 | `neg_nopin` | counter+digest only | malicious | negative control: review round 1's fork-hop must violate P3 |
 | `neg_sfonly` | + seqfloor (plan rev 2) | malicious | **the model's finding: still violates P3** (see below) |
-| `full` | + seq→digest memory | malicious, 3 devices | scripted attack tests + 10k-trace simulation (all invariants incl. P1) |
-| `full2` | + seq→digest memory | malicious, 2 devices | symbolic proof of P2/P3/P5 (depth: see "Why these bounds") |
+| `neg_alias` | full set, but one pin PER URL ALIAS | malicious, 2 devices, 2 aliases | negative control: the 0.1.0 alias bug — a stale alias accepts a rollback, and P3 falls (see below) |
+| `full` | + seq→digest memory, one pin per device | malicious, 3 devices, 2 aliases | scripted attack tests + 10k-trace simulation (all invariants incl. P1) |
+| `full2` | + seq→digest memory | malicious, 2 devices, 1 alias | symbolic proof of P2/P3/P5 (depth: see "Why these bounds") |
 | `honest` | full | honest git | P4 (CAS durability) proved at depth 5 + simulation |
 | `neg_force` | full | honest, force-push compact | negative control: §8's CAS rule is load-bearing |
 
 Negative controls run before the proofs (`spec.sh`) and double as
 calibration: the
-scripted violations are exactly 6 steps, and the verifier demonstrably
-finds them at depth 6 in seconds. The absence proofs run below the
+scripted violations are at most 6 steps (the alias one takes 4), and
+the verifier demonstrably finds them at depth 6 in seconds. The absence proofs run below the
 deepest known attack (6 steps), so the 6-step attack class is covered by
 these controls plus the deterministic guard tests, not by the symbolic
 proof (see "Why these bounds").
@@ -92,6 +105,15 @@ precisely:
 
 A machine with more patience than a laptop can raise the proof depth by
 passing `--depth` to `spec.sh`; nothing else changes.
+
+**The proof configurations use one alias, without loss of generality.**
+With `SHARED_PIN` every alias maps to the same slot, so a second alias
+adds a nondeterministic choice that changes no state; it would only
+cost the symbolic verifier branching. The two-alias behaviour is
+exercised where it can differ — `neg_alias` (the verifier finds the
+attack) and `full` (scripted refusals plus the 10k-trace simulation
+with both aliases in `step`). The depth-4 proof has NOT been re-run
+after the alias change (2026-09-05); the fast lane has.
 
 ## Properties
 
@@ -195,6 +217,37 @@ allocation state; the digest memory closes what it cannot see.
 
 Status: model-level finding; needs owner adjudication into plan rev 3
 before the FORMAT.md rewrite.
+
+## THE SECOND FINDING (2026-09-05): a pin per URL alias is not a pin
+
+The 0.1.0 implementation keyed pin *storage* by remote URL, consulting a
+sibling URL's pin only when the URL had none of its own. `neg_alias` is
+that design: every pin rule on, one slot per `(device, alias)`.
+
+```
+w ──push via A──▶ gen1: counter 2        pin(w,A) = gen1
+w ──push via B──▶ gen2: counter 3        pin(w,B) = gen2
+host replays gen1 via A                  accepted: pin(w,A) is still at counter 2
+```
+
+`staleAliasAcceptsRollbackTest` is that trace; nothing in the battery
+fires, because every check runs against the pin the read goes through
+and that pin is simply old. The P3 form needs a second writer:
+
+```
+w ──push via A──▶ gen1: seq2 = c1        seen(w,A) = {2 -> c1}
+z ──push from gen0──▶ gen2: seq2 = c2    (z's fork)
+z ──push──▶ gen3: counter 3, sf 3
+host serves gen3 to w via B              accepted: seen(w,B) has no 2
+```
+
+`staleAliasAcceptsReboundSequenceTest` walks it, and the verifier finds
+it unaided at depth 6 (`spec.sh`'s control loop) — four steps. With
+`SHARED_PIN` (`full`) both are refused:
+`sharedPinRefusesRollbackThroughStaleAliasTest`,
+`sharedPinRefusesReboundThroughOtherAliasTest`. FORMAT.md §7.4 now
+requires one pin per vault identity plus a durable URL → vault binding
+(the binding is outside this model, see "What is modeled").
 
 ## Model abstractions the spec refines
 

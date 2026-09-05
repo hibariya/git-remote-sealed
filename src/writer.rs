@@ -531,7 +531,8 @@ impl Ctx<'_> {
                         sequence_memory: [(1, stored.digest.clone())].into_iter().collect(),
                         pending: BTreeMap::new(),
                     };
-                    pinstore::save(&self.vault.pin_dir(), &pin)
+                    self.vault
+                        .save_pin(&pin)
                         .map_err(WriteError::AckedButPinNotSaved)?;
                     result = Ok(Attempt::Done(PushReport {
                         results,
@@ -756,7 +757,7 @@ impl Ctx<'_> {
         let mut pin_bound = pin_base.clone();
         if let Some((seq, _)) = allocated {
             pin_bound.pending.insert(seq, stored.digest.clone());
-            pinstore::save(&self.vault.pin_dir(), &pin_bound)?;
+            self.vault.save_pin(&pin_bound)?;
         }
 
         match self.vault.push_commit(&commit, &p.tree().branch, None)? {
@@ -766,7 +767,8 @@ impl Ctx<'_> {
                 let mut acked = pin_bound.clone();
                 pinstore::confirm_acked(&mut acked, manifest.seqfloor);
                 let pin = advanced_pin(&acked, &manifest, &manifest_digest);
-                pinstore::save(&self.vault.pin_dir(), &pin)
+                self.vault
+                    .save_pin(&pin)
                     .map_err(WriteError::AckedButPinNotSaved)?;
                 Ok(Attempt::Done(PushReport {
                     results,
@@ -782,7 +784,7 @@ impl Ctx<'_> {
                 // §8.5 definitive: a ref-level rejection proves the write did
                 // not land, so the binding is withdrawn before the retry.
                 if allocated.is_some() {
-                    restore_pin(self.vault, p.prev_pin())?;
+                    restore_pin(self.vault, p.prev_pin(), &m.vault_id)?;
                 }
                 Ok(Attempt::Rejected(summary))
             }
@@ -1004,11 +1006,17 @@ pub(crate) fn advanced_pin(bound: &Pin, manifest: &Manifest, manifest_digest: &s
     }
 }
 
-/// Put the pin store back to what the attempt started from.
-pub(crate) fn restore_pin(vault: &VaultRepo, prev: Option<&Pin>) -> Result<(), WriteError> {
+/// Put the vault's pin back to what the attempt started from. `prev ==
+/// None` means the repository held no pin for the vault at all (through
+/// any URL), so the pending binding was its first record: remove it.
+pub(crate) fn restore_pin(
+    vault: &VaultRepo,
+    prev: Option<&Pin>,
+    vault_id: &str,
+) -> Result<(), WriteError> {
     match prev {
-        Some(pin) => pinstore::save(&vault.pin_dir(), pin)?,
-        None => pinstore::remove(&vault.pin_dir())?,
+        Some(pin) => vault.save_pin(pin)?,
+        None => vault.pins()?.remove_vault(vault_id)?,
     }
     Ok(())
 }

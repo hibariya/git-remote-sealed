@@ -30,12 +30,14 @@ done
 # without --main picks the base module, which has no tests, and exits 0
 # having run nothing. So the loop is not a style choice: collapsing it gives
 # a green run that checked nothing.
-CONFIGS='neg_nopin neg_sfonly full honest neg_force'
+CONFIGS='neg_nopin neg_sfonly neg_alias full honest neg_force'
 
-# The two configurations with protections switched OFF. The known attacks
+# The configurations with a protection switched OFF. The known attacks
 # MUST still be found in them: an invariant that has quietly become
-# unfalsifiable passes every other check in this file.
-CONTROLS='neg_nopin neg_sfonly'
+# unfalsifiable passes every other check in this file. neg_alias keeps
+# every pin rule but gives each URL alias a pin of its own (the 0.1.0
+# implementation): the verifier must find the alias attack on its own.
+CONTROLS='neg_nopin neg_sfonly neg_alias'
 
 echo "== typecheck =="
 quint typecheck sealed_v2.qnt

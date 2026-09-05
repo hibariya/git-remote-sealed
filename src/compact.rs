@@ -165,7 +165,7 @@ pub fn compact(
         let mut pin_bound = pin_base.clone();
         if let Some(seq) = allocated {
             pin_bound.pending.insert(seq, stored.digest.clone());
-            pinstore::save(&vault.pin_dir(), &pin_bound)?;
+            vault.save_pin(&pin_bound)?;
         }
 
         // §9.4: compare-and-swap against T; never a plain force.
@@ -174,7 +174,9 @@ pub fn compact(
                 let mut acked = pin_bound.clone();
                 pinstore::confirm_acked(&mut acked, manifest.seqfloor);
                 let pin = advanced_pin(&acked, &manifest, &manifest_digest);
-                pinstore::save(&vault.pin_dir(), &pin).map_err(WriteError::AckedButPinNotSaved)?;
+                vault
+                    .save_pin(&pin)
+                    .map_err(WriteError::AckedButPinNotSaved)?;
                 return Ok(CompactReport {
                     counter,
                     allocated,
@@ -184,7 +186,7 @@ pub fn compact(
             PushOutcome::Rejected(summary) => {
                 // §8.5 definitive: withdraw the binding before the retry.
                 if allocated.is_some() {
-                    pinstore::save(&vault.pin_dir(), &pin_base)?;
+                    vault.save_pin(&pin_base)?;
                 }
                 last = summary;
             }

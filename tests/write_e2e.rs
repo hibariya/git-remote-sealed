@@ -914,10 +914,22 @@ fn info_prints_recipients_and_forget_needs_yes() {
     // is the forfeit §7.5 warns about (the formal model's
     // forgetForfeitsRollbackProtectionTest).
     let state = state_dir(&dest);
+    let pin = pin_dir(&dest);
     let out = cli(&dest, &lab.id_file, &["forget", "--yes", "origin"]);
     assert_ok(&out, "forget --yes");
-    assert!(!state.join("pin").exists());
-    assert!(!state.join("mirror.git").exists());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("forgot the pin, sequence memory, and mirror"),
+        "{text}"
+    );
+    assert!(
+        !pin.exists(),
+        "the vault's pin is gone: no other URL used it"
+    );
+    assert!(
+        !state.exists(),
+        "mirror, scratch and vault binding are gone"
+    );
     assert_ok(
         &lab.fetch(&dest),
         "the rolled-back vault is accepted after forget",
@@ -992,4 +1004,58 @@ fn unknown_manifest_line_makes_the_writer_read_only() {
     let err = stderr_of(&out);
     assert!(err.contains("refusing to write (read-only)"), "{err}");
     assert_eq!(lab.manifest().refs["refs/heads/main"], c1);
+}
+
+#[test]
+fn pushes_through_two_aliases_share_one_pin() {
+    // §7.4/§8.4 on the write side: a push through a second spelling of the
+    // vault URL binds its sequence number in the SAME pin the first
+    // spelling advanced, so the allocation guard and the rollback check
+    // see both histories as one.
+    let lab = Lab::new("w-alias");
+    let src = lab.source("src");
+    src.commit_file("note.md", "one\n", "first");
+    lab.push_ok(&src.dir, &["main"]);
+    let gen1 = lab.remote.tip("main");
+
+    let alias = format!("{}/", lab.remote.sealed_url());
+    src.add_remote("alias", &alias);
+    src.commit_file("note.md", "two\n", "second");
+    let out = sealed_git(
+        &src.dir,
+        &["push", "-q", "alias", "main"],
+        &lab.id_file,
+        &[],
+    );
+    assert_ok(&out, "push through the alias");
+    let m = lab.manifest();
+    assert_eq!((m.counter, m.seqfloor), (2, 2));
+
+    // One pin, bound through both spellings, holding both writes.
+    let pin = pinstore::load(&pin_dir(&src.dir))
+        .expect("readable")
+        .expect("pinned");
+    assert_eq!(pin.counter, 2);
+    assert_eq!(
+        pin.sequence_memory.keys().copied().collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let urls = fs::read_dir(sealed_root(&src.dir).join("urls"))
+        .expect("urls")
+        .count();
+    assert_eq!(urls, 2);
+
+    // The host replays generation 1 to origin, whose memory a per-URL pin
+    // would have left at counter 1: the push is refused as a rollback.
+    lab.remote.set_branch("main", &gen1);
+    src.commit_file("note.md", "three\n", "third");
+    let out = lab.push(&src.dir, &["main"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out)
+            .contains("vault rolled back: manifest counter 1 is below the last accepted counter 2"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(lab.remote.tip("main"), gen1, "nothing was pushed");
 }

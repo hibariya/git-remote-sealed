@@ -59,6 +59,7 @@ document alone governs. Silence in the model is never permission.
 | Apply order and prerequisite closure (§4.3, §6) | `inv_p5_prereqClosure` |
 | File-set acceptance exactness (§6.7) | `acceptFiles`; `inv_p1_acceptExactness` |
 | What `forget` forfeits (§7.5) | the forget demonstration runs (`rollbackRefusedWithoutForgetTest` / `forgetForfeitsRollbackProtectionTest`) |
+| One pin per vault identity, shared by every URL alias (§7.4) | `SHARED_PIN`; negative control `neg_alias` (`staleAliasAcceptsRollbackTest`, `staleAliasAcceptsReboundSequenceTest`) |
 
 The model also carries this format's threat model in executable form:
 its negative-control configurations demonstrate the concrete attacks
@@ -293,11 +294,14 @@ not something to implement from this document.
    maintain a local mirror MUST reset it to the remote state, never
    merge. They MUST NOT let untracked local files (e.g. leftovers of an
    interrupted write) masquerade as vault content. Concurrent
-   operations sharing one local mirror — and the pin and memory state
-   kept alongside it (§7.4) — MUST be serialized (e.g. with a lock);
-   otherwise one operation's cleanup can delete another operation's
-   not-yet-committed bundle, publishing a manifest that references a
-   missing file. A local mirror MUST be created in the vault
+   operations of one local repository that share a mirror, or the pin
+   and memory state of §7.4 — which every URL alias of a vault shares —
+   MUST be serialized (e.g. with a lock), whichever URL each of them
+   uses; otherwise one operation's cleanup can delete another
+   operation's not-yet-committed bundle, publishing a manifest that
+   references a missing file, or two operations can each advance the
+   pin from a stale copy. One lock per local repository is sufficient
+   and has no lock order to get wrong. A local mirror MUST be created in the vault
    repository's own object format, learned from the remote's advertised
    object ids — it is independent of the manifest's `objectformat`
    (§3). Before applying, readers MUST refuse a destination repository
@@ -486,11 +490,27 @@ line on its next push.
 
 Per (local repository, vault), readers MUST maintain a **pin** — their
 memory of the vault — and MUST validate every manifest against it.
-Implementations MAY key pin *storage* by remote URL (so a substituted
-vault served at a familiar URL meets that URL's pin), but a vault
-reached through a new spelling of its URL MUST be validated against the
-strongest pin the repository already holds for its vault identity — a
-respelled remote must not reset rollback protection. The checks:
+The pin is **one per vault identity**, shared by every remote URL
+through which the repository reaches that vault: an SSH and an HTTPS
+spelling, a path with and without a trailing slash, any alias at all.
+Keying the pin by URL is INVALID, even with a fallback to another
+URL's pin on first contact: two URLs that each hold a pin stop sharing
+what they learn, and a host can then replay an old generation through
+the URL whose memory is older. [7h] URL normalization is not a
+substitute — no rewriting makes two transports one string — so the key
+MUST be the vault identity the manifest declares.
+
+Keying by the manifest's own identity has a hole of its own: a
+substituted vault served at a familiar URL would simply meet a fresh
+pin. So each remote URL MUST additionally keep a durable **binding** to
+the vault identity first pinned through it, and a manifest whose
+`vault` differs from the URL's binding is INVALID — checked BEFORE any
+pin is looked up by that manifest's identity. A URL with no binding
+yet is bound on the first pin saved through it, and until then meets
+whatever pin the repository already holds for the manifest's vault
+identity (a respelled remote must not reset rollback protection). A
+bound URL that presents an *empty* vault is treated as the pinned
+reader below treats one. The checks:
 
 - **vault identity**: pinned on first contact; a manifest whose `vault`
   differs is INVALID (whole-vault substitution).
@@ -600,6 +620,21 @@ refuses the fork. In the formal model this limit is not an exception to
 drops the device's own unconfirmed claim along with it (`forgetOwn`), so
 one sequence number never carries two claims.
 
+**7h.** The divergence is silent because every check passes against the
+pin it is run against: through URL A the repository saved counter 2,
+through URL B counter 3, and a replay of counter 2 through A meets A's
+pin at counter 2 — equal counter, same manifest, accepted. The device's
+view of the vault has gone backwards with nothing firing. With one pin
+the same replay is a rollback. The model's `neg_alias` configuration
+carries this and its sequence-rebinding form (`spec/README.md`).
+Merging per-URL pins into the one pin, for implementations that once
+kept them, MUST keep every confirmed binding of every record — taking
+the record with the highest counter discards memory — and MUST fail on
+records that contradict each other (an equal counter with a different
+manifest digest, a number bound to two digests, a different
+objectformat): those are a fork or rollback already observed, not a
+tie to break.
+
 ### 7.5 Discarding the pin
 
 Implementations SHOULD make deliberate vault re-creation recoverable by
@@ -611,11 +646,13 @@ the formal model's `forget` run pair demonstrates the forfeit exactly.
 The legitimate use is a vault deliberately deleted and re-created at
 the same URL; when the new vault can live at a new URL instead, no
 discard is needed anywhere (a new vault has a new identity, and pins
-are per vault). Discarding the pin kept for one URL spelling leaves
-pins other spellings hold for the same vault identity in force (§7.4's
-per-vault lookup) — which never blocks the legitimate use, since a
-re-created vault carries a new identity, and which means an attacker
-cannot be helped by a partial discard.
+are per vault). A discard is scoped to one URL: it removes that URL's
+binding (§7.4), and the vault's pin only when no other URL of the
+repository is still bound to that vault identity. That never blocks
+the legitimate use, since a re-created vault carries a new identity
+and the unbound URL meets it as first contact — and it means an
+attacker cannot be helped by a partial discard: every URL still bound
+keeps the whole memory.
 
 ## 8. Writer algorithm (push)
 
@@ -975,6 +1012,14 @@ recipe is almost always what you want.
   (seq→digest, read- and write-side) — the last found by the formal
   model, which this version carries as the normative companion for the
   protocol core (§2).
+- **Errata** (2026-09-05): §7.4 allowed pins keyed by remote URL with a
+  per-vault fallback on first contact. Once two URLs of one vault each
+  held a pin, their memories diverged and a host could replay an old
+  generation through the staler URL (note 7h; the model's `neg_alias`
+  control). The pin is now one per vault identity, each URL keeps a
+  durable binding to its vault, §6.1's serialization spans every URL of
+  a repository, and §7.5's discard is scoped by binding. Reader-local
+  state only: no wire-format change.
 - **Errata** (2026-09-04), from an adversarial review of the changes made
   after the previous one: §7.4's
   persist-after-apply rule contradicted §8.4's burn rule, which confirms

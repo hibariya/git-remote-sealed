@@ -13,10 +13,15 @@
 //   Gen.id             the manifest ciphertext digest
 //   Gen.parent         the generation its writer built on
 //   tip                the honest host's branch tip
-//   pin                the §7.4 TOFU pin
-//   seen               CONFIRMED seq -> digest memory (§7.4)
-//   pend               PENDING seq -> digest memory (§8.4)
-//   trusted            everything a device ever accepted (P3's witness)
+//   Slot               where a device keeps its pin: (device, url) with a
+//                      pin per URL spelling, or (device, "*") with the one
+//                      shared pin §7.4 requires
+//   pin                the §7.4 TOFU pin, per slot
+//   seen               CONFIRMED seq -> digest memory (§7.4), per slot
+//   pend               PENDING seq -> digest memory (§8.4), per slot
+//   trusted            everything a device ever accepted (P3's witness) —
+//                      per DEVICE: however many URLs it uses, one local
+//                      repository holds the objects
 //   doPush crash=true  the push is acked but the pin never moves (T9)
 // For concrete values, run with --verbosity=3.
 //
@@ -25,6 +30,8 @@
 // negative control below.
 //   PIN_SEQFLOOR   the seqfloor pin
 //   PIN_SEQDIGESTS the seq -> digest memory (both halves)
+//   SHARED_PIN     one pin per (device, vault), shared by every URL alias
+//                  (§7.4); false = one pin per (device, URL), the 0.1.0 bug
 //   HONEST_HOST    host follows git semantics (tip + CAS)
 //   CAS_COMPACT    compaction uses compare-and-swap
 //
@@ -41,14 +48,27 @@
 module sealed_v2 {
   const PIN_SEQFLOOR: bool
   const PIN_SEQDIGESTS: bool
+  const SHARED_PIN: bool
   const HONEST_HOST: bool
   const CAS_COMPACT: bool
   const MAX_GENS: int
   const DEVICES: Set[str]
+  // URL spellings under which the one vault is reached. Every alias names
+  // the same vault; the host cannot tell them apart in any way that
+  // matters here, but a device with a pin per alias can.
+  const ALIASES: Set[str]
 
   type Bundle = { seq: int, content: int, prereqs: Set[int] }
   type Gen = { id: int, parent: int, counter: int, seqfloor: int, bundles: Set[Bundle] }
   type Pin = { counter: int, genId: int, seqfloor: int }
+  type Slot = (str, str)
+
+  // §7.4: where device d keeps the pin it consults when it reaches the
+  // vault through alias a. With SHARED_PIN every alias meets the same
+  // pin; without it each alias has a memory of its own.
+  pure def slotOf(d: str, a: str): Slot = if (SHARED_PIN) (d, "*") else (d, a)
+  val slots: Set[Slot] =
+    if (SHARED_PIN) DEVICES.map(d => (d, "*")) else tuples(DEVICES, ALIASES)
 
   // every generation a genuine writer produced, by id
   var store: int -> Gen
@@ -59,27 +79,32 @@ module sealed_v2 {
   // next fresh id; doubles as fresh bundle content
   var nextId: int
 
-  // the §7.4 TOFU pin, per device
-  var pin: str -> Pin
+  // the §7.4 TOFU pin, per slot
+  var pin: Slot -> Pin
 
-  // §7.4 CONFIRMED memory: seq -> content this device has evidence for.
+  // §7.4 CONFIRMED memory: seq -> content this slot has evidence for.
   // Only this half filters reads.
-  var seen: str -> (int -> int)
+  var seen: Slot -> (int -> int)
 
   // §8.4 PENDING memory: a binding written before one of this device's own
   // pushes, whose outcome it never learned. Nobody may have taken that
   // write, so it is a guess, not evidence — `accepts` ignores it. It binds
   // the number for this device alone, through allocation.
-  var pend: str -> (int -> int)
+  var pend: Slot -> (int -> int)
 
-  // every bundle a device ever accepted — P3's witness
+  // every bundle a device ever accepted — P3's witness. Per device, not
+  // per slot: the objects land in one local repository whichever URL
+  // fetched them, so two slots that disagree are one device contradicting
+  // itself.
   var trusted: str -> Set[Bundle]
 
   // generations whose push was acknowledged to its writer (P4)
   var acked: Set[int]
 
-  // the generation a compaction observed at its start
+  // the generation a compaction observed at its start, and the alias it
+  // went through (its commit must use the same pin)
   var compactObs: str -> int
+  var compactVia: str -> str
 
   // is a compaction between its start and commit/abort?
   var compactInFlight: str -> bool
@@ -145,59 +170,70 @@ module sealed_v2 {
 
   // The v2 reader acceptance battery, minus file checks (modeled in P1):
   // counter monotone with twin check; seqfloor monotone; seq->digest stable.
-  def accepts(d: str, g: Gen): bool = and {
+  // Run against the pin of the SLOT the read goes through.
+  def accepts(s: Slot, g: Gen): bool = and {
     or {
-      g.counter > pin.get(d).counter,
-      and { g.counter == pin.get(d).counter, g.id == pin.get(d).genId },
+      g.counter > pin.get(s).counter,
+      and { g.counter == pin.get(s).counter, g.id == pin.get(s).genId },
     },
-    PIN_SEQFLOOR implies (g.seqfloor >= pin.get(d).seqfloor),
+    PIN_SEQFLOOR implies (g.seqfloor >= pin.get(s).seqfloor),
     PIN_SEQDIGESTS implies g.bundles.forall(b =>
-      seen.get(d).keys().contains(b.seq) implies (seen.get(d).get(b.seq) == b.content)),
+      seen.get(s).keys().contains(b.seq) implies (seen.get(s).get(b.seq) == b.content)),
   }
 
   pure val genesisBundle: Bundle = { seq: 1, content: 0, prereqs: Set() }
   pure val genesis: Gen =
     { id: 0, parent: -1, counter: 1, seqfloor: 1, bundles: Set(genesisBundle) }
 
+  // Every slot pinned at genesis: with a pin per alias, this is the
+  // "both URLs have saved pins" precondition of the alias attack.
   action init = all {
     store' = Map(0 -> genesis),
     tip' = 0,
     nextId' = 1,
-    pin' = DEVICES.mapBy(d => { counter: 1, genId: 0, seqfloor: 1 }),
-    seen' = DEVICES.mapBy(d => bindAll(Map(), genesis.bundles)),
-    pend' = DEVICES.mapBy(d => Map()),
+    pin' = slots.mapBy(s => { counter: 1, genId: 0, seqfloor: 1 }),
+    seen' = slots.mapBy(s => bindAll(Map(), genesis.bundles)),
+    pend' = slots.mapBy(s => Map()),
     trusted' = DEVICES.mapBy(d => Set(genesisBundle)),
     acked' = Set(0),
     compactObs' = DEVICES.mapBy(d => 0),
+    compactVia' = DEVICES.mapBy(d => "*"),
     compactInFlight' = DEVICES.mapBy(d => false),
   }
 
-  // Device d fetches; the host serves generation gid (malicious: any genuine
-  // one; honest: the tip). Accepting updates pin, seen, trusted.
-  action doRead(d: str, gid: int): bool = all {
-    HONEST_HOST implies (gid == tip),
-    accepts(d, store.get(gid)),
-    pin' = pin.set(d, {
-      counter: store.get(gid).counter,
-      genId: gid,
-      seqfloor: maxInt(pin.get(d).seqfloor, store.get(gid).seqfloor) }),
-    seen' = seen.set(d, bindAll(seen.get(d), store.get(gid).bundles)),
-    pend' = pend.set(d, settle(pend.get(d), store.get(gid))),
-    trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(d), store.get(gid))
-      .union(store.get(gid).bundles)),
-    store' = store, tip' = tip, nextId' = nextId, acked' = acked,
-    compactObs' = compactObs, compactInFlight' = compactInFlight,
+  // Device d fetches through alias a; the host serves generation gid
+  // (malicious: any genuine one; honest: the tip). Accepting updates the
+  // slot's pin, seen, pend and the device's trusted set.
+  action doRead(d: str, a: str, gid: int): bool = {
+    val s = slotOf(d, a)
+    all {
+      HONEST_HOST implies (gid == tip),
+      accepts(s, store.get(gid)),
+      pin' = pin.set(s, {
+        counter: store.get(gid).counter,
+        genId: gid,
+        seqfloor: maxInt(pin.get(s).seqfloor, store.get(gid).seqfloor) }),
+      seen' = seen.set(s, bindAll(seen.get(s), store.get(gid).bundles)),
+      pend' = pend.set(s, settle(pend.get(s), store.get(gid))),
+      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(s), store.get(gid))
+        .union(store.get(gid).bundles)),
+      store' = store, tip' = tip, nextId' = nextId, acked' = acked,
+      compactObs' = compactObs, compactVia' = compactVia,
+      compactInFlight' = compactInFlight,
+    }
   }
 
-  // Device d pushes on top of served generation baseId (a push is a
-  // validated fetch plus one commit). withBundle=false is a manifest-only
-  // push: a ref move or delete, so seqfloor and bundles do not change.
-  // crash=true is the T9 window — acknowledged, but the pin never moved.
-  action doPush(d: str, baseId: int, withBundle: bool, crash: bool): bool = {
+  // Device d pushes through alias a on top of served generation baseId (a
+  // push is a validated fetch plus one commit). withBundle=false is a
+  // manifest-only push: a ref move or delete, so seqfloor and bundles do
+  // not change. crash=true is the T9 window — acknowledged, but the pin
+  // never moved.
+  action doPush(d: str, a: str, baseId: int, withBundle: bool, crash: bool): bool = {
+    val s = slotOf(d, a)
     val base = store.get(baseId)
     // With PIN_SEQDIGESTS off there is no memory at all, so no skipping.
     // The reallocation negative controls below depend on that.
-    val settled = settle(pend.get(d), base)
+    val settled = settle(pend.get(s), base)
     val newSeq =
       if (PIN_SEQDIGESTS) allocFrom(settled, base.seqfloor + 1, MAX_GENS)
       else base.seqfloor + 1
@@ -209,59 +245,66 @@ module sealed_v2 {
               seqfloor: if (withBundle) newSeq else base.seqfloor, bundles: newBundles }
     all {
       nextId < MAX_GENS,
-      accepts(d, base),
+      accepts(s, base),
       // §8.4 guard, found by the verifier: never allocate a CONFIRMED
       // number. A collision proves the served base predates this device's
       // own history — its own acknowledged push replayed by the host, say —
       // so refuse and refetch. (A PENDING number is skipped, not refused.)
       (PIN_SEQDIGESTS and withBundle) implies
-        not(seen.get(d).keys().contains(newSeq)),
+        not(seen.get(s).keys().contains(newSeq)),
       HONEST_HOST implies (baseId == tip),   // non-forced push == CAS on the tip
       store' = store.put(nextId, g),
       tip' = if (baseId == tip) nextId else tip,
       nextId' = nextId + 1,
       acked' = acked.union(Set(nextId)),
       pin' = if (crash) pin
-             else pin.set(d, { counter: g.counter, genId: g.id, seqfloor: g.seqfloor }),
+             else pin.set(s, { counter: g.counter, genId: g.id, seqfloor: g.seqfloor }),
       // §8.4 binding timing: the device's own binding is PENDING until the
       // push is acknowledged to it, which under crash=true never happens.
       // An acknowledged push also confirms whatever its seqfloor burned.
-      seen' = seen.set(d,
-        if (crash) bindAll(seen.get(d), base.bundles)
-        else mergeMap(bindAll(seen.get(d), newBundles), burnedBy(settled, g.seqfloor))),
-      pend' = pend.set(d,
+      seen' = seen.set(s,
+        if (crash) bindAll(seen.get(s), base.bundles)
+        else mergeMap(bindAll(seen.get(s), newBundles), burnedBy(settled, g.seqfloor))),
+      pend' = pend.set(s,
         if (crash) (if (withBundle) settled.put(newSeq, nextId) else settled)
         else stillAbove(settled, g.seqfloor)),
-      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(d), base).union(newBundles)),
-      compactObs' = compactObs, compactInFlight' = compactInFlight,
+      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(s), base).union(newBundles)),
+      compactObs' = compactObs, compactVia' = compactVia,
+      compactInFlight' = compactInFlight,
     }
   }
 
   // Two phases, so the observe/commit race of §8 is reachable: start
-  // records the observed tip, commit compare-and-swaps against it.
-  action doCompactStart(d: str, obsId: int): bool = all {
-    not(compactInFlight.get(d)),
-    HONEST_HOST implies (obsId == tip),
-    accepts(d, store.get(obsId)),
-    compactObs' = compactObs.set(d, obsId),
-    compactInFlight' = compactInFlight.set(d, true),
-    pin' = pin.set(d, {
-      counter: store.get(obsId).counter,
-      genId: obsId,
-      seqfloor: maxInt(pin.get(d).seqfloor, store.get(obsId).seqfloor) }),
-    seen' = seen.set(d, bindAll(seen.get(d), store.get(obsId).bundles)),
-    pend' = pend.set(d, settle(pend.get(d), store.get(obsId))),
-    trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(d), store.get(obsId))
-      .union(store.get(obsId).bundles)),
-    store' = store, tip' = tip, nextId' = nextId, acked' = acked,
+  // records the observed tip, commit compare-and-swaps against it. The
+  // commit goes through the alias the start used (one operation, one pin).
+  action doCompactStart(d: str, a: str, obsId: int): bool = {
+    val s = slotOf(d, a)
+    all {
+      not(compactInFlight.get(d)),
+      HONEST_HOST implies (obsId == tip),
+      accepts(s, store.get(obsId)),
+      compactObs' = compactObs.set(d, obsId),
+      compactVia' = compactVia.set(d, a),
+      compactInFlight' = compactInFlight.set(d, true),
+      pin' = pin.set(s, {
+        counter: store.get(obsId).counter,
+        genId: obsId,
+        seqfloor: maxInt(pin.get(s).seqfloor, store.get(obsId).seqfloor) }),
+      seen' = seen.set(s, bindAll(seen.get(s), store.get(obsId).bundles)),
+      pend' = pend.set(s, settle(pend.get(s), store.get(obsId))),
+      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(s), store.get(obsId))
+        .union(store.get(obsId).bundles)),
+      store' = store, tip' = tip, nextId' = nextId, acked' = acked,
+    }
   }
 
   action doCompactCommit(d: str, crash: bool): bool = {
+    val s = slotOf(d, compactVia.get(d))
     val base = store.get(compactObs.get(d))
     // §9.2 allocates by §8.4. Compaction can only SKIP a pending number,
     // never re-publish it: §4.1 wants `-full` at the lowest listed number,
     // and a compacted list holds exactly one bundle.
-    val settled = settle(pend.get(d), base)
+    val settled = settle(pend.get(s), base)
     val newSeq =
       if (PIN_SEQDIGESTS) allocFrom(settled, base.seqfloor + 1, MAX_GENS)
       else base.seqfloor + 1
@@ -272,7 +315,7 @@ module sealed_v2 {
       compactInFlight.get(d),
       nextId < MAX_GENS,
       // Same allocation guard as doPush: compaction allocates too.
-      PIN_SEQDIGESTS implies not(seen.get(d).keys().contains(newSeq)),
+      PIN_SEQDIGESTS implies not(seen.get(s).keys().contains(newSeq)),
       // §8 step 4: compare-and-swap, never plain force. CAS_COMPACT=false is
       // the negative control that shows the rule is load-bearing.
       (HONEST_HOST and CAS_COMPACT) implies (tip == compactObs.get(d)),
@@ -281,14 +324,15 @@ module sealed_v2 {
       nextId' = nextId + 1,
       acked' = acked.union(Set(nextId)),
       pin' = if (crash) pin
-             else pin.set(d, { counter: g.counter, genId: g.id, seqfloor: g.seqfloor }),
-      seen' = seen.set(d,
-        if (crash) seen.get(d)
-        else mergeMap(bindAll(seen.get(d), g.bundles), burnedBy(settled, g.seqfloor))),
-      pend' = pend.set(d,
+             else pin.set(s, { counter: g.counter, genId: g.id, seqfloor: g.seqfloor }),
+      seen' = seen.set(s,
+        if (crash) seen.get(s)
+        else mergeMap(bindAll(seen.get(s), g.bundles), burnedBy(settled, g.seqfloor))),
+      pend' = pend.set(s,
         if (crash) settled.put(newSeq, nextId) else stillAbove(settled, g.seqfloor)),
-      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(d), base).union(g.bundles)),
-      compactObs' = compactObs, compactInFlight' = compactInFlight.set(d, false),
+      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(s), base).union(g.bundles)),
+      compactObs' = compactObs, compactVia' = compactVia,
+      compactInFlight' = compactInFlight.set(d, false),
     }
   }
 
@@ -298,6 +342,7 @@ module sealed_v2 {
     store' = store, tip' = tip, nextId' = nextId, pin' = pin, seen' = seen,
     pend' = pend,
     trusted' = trusted, acked' = acked, compactObs' = compactObs,
+    compactVia' = compactVia,
   }
 
   // Zero-ref compaction: every ref was deleted, so the replacement
@@ -305,6 +350,7 @@ module sealed_v2 {
   // never restart. The next bundle push into it has no prerequisites, which
   // makes it a complete snapshot and re-roots recovery (inv_p_rooting).
   action doCompactCommitEmpty(d: str, crash: bool): bool = {
+    val s = slotOf(d, compactVia.get(d))
     val base = store.get(compactObs.get(d))
     val g = { id: nextId, parent: compactObs.get(d), counter: base.counter + 1,
               seqfloor: base.seqfloor, bundles: Set() }
@@ -317,38 +363,50 @@ module sealed_v2 {
       nextId' = nextId + 1,
       acked' = acked.union(Set(nextId)),
       pin' = if (crash) pin
-             else pin.set(d, { counter: g.counter, genId: g.id, seqfloor: g.seqfloor }),
-      seen' = seen, pend' = pend.set(d, settle(pend.get(d), base)),
-      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(d), base)),
-      compactObs' = compactObs, compactInFlight' = compactInFlight.set(d, false),
+             else pin.set(s, { counter: g.counter, genId: g.id, seqfloor: g.seqfloor }),
+      seen' = seen, pend' = pend.set(s, settle(pend.get(s), base)),
+      trusted' = trusted.set(d, forgetOwn(trusted.get(d), pend.get(s), base)),
+      compactObs' = compactObs, compactVia' = compactVia,
+      compactInFlight' = compactInFlight.set(d, false),
     }
   }
 
-  // `forget` wipes the pin and both halves of the memory. Modeled to show
-  // what it forfeits, not to bless it — and kept OUT of `step`: with the
-  // protections gone, accepting a rollback is the expected outcome, which
-  // would make the safety invariants refutable for the wrong reason.
-  action doForget(d: str): bool = all {
-    pin' = pin.set(d, { counter: 0, genId: -1, seqfloor: 0 }),
-    seen' = seen.set(d, Map()),
-    pend' = pend.set(d, Map()),
-    store' = store, tip' = tip, nextId' = nextId, trusted' = trusted,
-    acked' = acked, compactObs' = compactObs, compactInFlight' = compactInFlight,
+  // `forget` wipes the pin and both halves of the memory of the slot the
+  // alias uses. Modeled to show what it forfeits, not to bless it — and
+  // kept OUT of `step`: with the protections gone, accepting a rollback is
+  // the expected outcome, which would make the safety invariants refutable
+  // for the wrong reason. (The implementation refines this: with a shared
+  // pin, forgetting one alias keeps the pin while another alias of the
+  // same device still relies on it — a refinement that only ever forgets
+  // LESS than this action does.)
+  action doForget(d: str, a: str): bool = {
+    val s = slotOf(d, a)
+    all {
+      pin' = pin.set(s, { counter: 0, genId: -1, seqfloor: 0 }),
+      seen' = seen.set(s, Map()),
+      pend' = pend.set(s, Map()),
+      store' = store, tip' = tip, nextId' = nextId, trusted' = trusted,
+      acked' = acked, compactObs' = compactObs, compactVia' = compactVia,
+      compactInFlight' = compactInFlight,
+    }
   }
 
   // --- nondeterministic step for model checking ---
 
   action read = { nondet d = DEVICES.oneOf()
+                  nondet a = ALIASES.oneOf()
                   nondet gid = store.keys().oneOf()
-                  doRead(d, gid) }
+                  doRead(d, a, gid) }
   action push = { nondet d = DEVICES.oneOf()
+                  nondet a = ALIASES.oneOf()
                   nondet baseId = store.keys().oneOf()
                   nondet wb = Set(true, false).oneOf()
                   nondet cr = Set(true, false).oneOf()
-                  doPush(d, baseId, wb, cr) }
+                  doPush(d, a, baseId, wb, cr) }
   action compactStart = { nondet d = DEVICES.oneOf()
+                          nondet a = ALIASES.oneOf()
                           nondet obsId = store.keys().oneOf()
-                          doCompactStart(d, obsId) }
+                          doCompactStart(d, a, obsId) }
   action compactCommit = { nondet d = DEVICES.oneOf()
                            nondet cr = Set(true, false).oneOf()
                            doCompactCommit(d, cr) }
@@ -375,15 +433,18 @@ module sealed_v2 {
     allBundles.powerset().forall(f => acceptFiles(g, f) implies (f == g.bundles))
   })
 
-  // P2: acceptance implies monotone observations. The stronger "only
-  // descendants are accepted" is deliberately absent — it is FALSE under a
-  // malicious host (§9 admits forks), and the neg_* runs below are exactly
-  // such fork acceptances.
-  val inv_p2_guardMonotone = DEVICES.forall(d => store.keys().forall(gid => {
+  // P2: acceptance implies monotone observations, for the pin the read
+  // goes through. The stronger "only descendants are accepted" is
+  // deliberately absent — it is FALSE under a malicious host (§9 admits
+  // forks), and the neg_* runs below are exactly such fork acceptances.
+  // Note what P2 does NOT say: that the pin consulted is the device's most
+  // advanced one. With a pin per alias it need not be (neg_alias), and P2
+  // still holds — P3 is what falls.
+  val inv_p2_guardMonotone = slots.forall(s => store.keys().forall(gid => {
     val g = store.get(gid)
-    accepts(d, g) implies and {
-      g.counter >= pin.get(d).counter,
-      PIN_SEQFLOOR implies (g.seqfloor >= pin.get(d).seqfloor),
+    accepts(s, g) implies and {
+      g.counter >= pin.get(s).counter,
+      PIN_SEQFLOOR implies (g.seqfloor >= pin.get(s).seqfloor),
     }
   }))
 
@@ -407,6 +468,10 @@ module sealed_v2 {
   // DEVICE, BY THIS CHECK. Its own next acknowledged push ends that window
   // by burning the number (`burnedBy`), and any device that read the landed
   // generation holds the binding CONFIRMED and still refuses the fork.
+  //
+  // The witness is per DEVICE while the memory is per SLOT, so P3 is also
+  // what says whether a device's slots may disagree: with a pin per alias
+  // they can, and the verifier finds the trace (neg_alias).
   val inv_p3_neverReuse = DEVICES.forall(d =>
     trusted.get(d).forall(b1 => trusted.get(d).forall(b2 =>
       (b1.seq == b2.seq) implies (b1.content == b2.content))))
@@ -460,25 +525,27 @@ module sealed_v2 {
 // ===========================================================================
 // Configurations. Negative controls FIRST: a model that cannot rediscover
 // the known attacks is too weak for its green results to mean anything.
+// Every configuration below reaches the vault through alias "A"; the two
+// alias configurations add "B".
 // ===========================================================================
 
 // Review round 1's fork-hop (R2-F2), no pins beyond v1: must violate P3.
 module neg_nopin {
   import sealed_v2(
-    PIN_SEQFLOOR = false, PIN_SEQDIGESTS = false,
+    PIN_SEQFLOOR = false, PIN_SEQDIGESTS = false, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
 
   // w's push crash-lags its pin; the host then lets w build a second line
   // from genesis that re-allocates seq 2. y accepts the fork.
   run forkHopFindsP3ViolationTest =
     init
-      .then(doPush("w", 0, true, true))      // gen1: fork A, seq2=cA; pin lag
-      .then(doRead("y", 1))                  // y pins A (counter 2, sf 2)
-      .then(doPush("w", 0, false, false))    // gen2: fork B, counter 2, sf 1
-      .then(doPush("w", 2, false, false))    // gen3: counter 3, sf 1
-      .then(doPush("w", 3, true, false))     // gen4: counter 4, sf 2, seq2=cB
-      .then(doRead("y", 4))                  // ACCEPTED: counter 4 > 2
+      .then(doPush("w", "A", 0, true, true))      // gen1: fork A, seq2=cA; pin lag
+      .then(doRead("y", "A", 1))                  // y pins A (counter 2, sf 2)
+      .then(doPush("w", "A", 0, false, false))    // gen2: fork B, counter 2, sf 1
+      .then(doPush("w", "A", 2, false, false))    // gen3: counter 3, sf 1
+      .then(doPush("w", "A", 3, true, false))     // gen4: counter 4, sf 2, seq2=cB
+      .then(doRead("y", "A", 4))                  // ACCEPTED: counter 4 > 2
       .expect(not(inv_p3_neverReuse))
 }
 
@@ -488,27 +555,27 @@ module neg_nopin {
 // finding against plan rev 2 (see README).
 module neg_sfonly {
   import sealed_v2(
-    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = false,
+    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = false, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
 
   run intermediateHopRejectedTest =
     init
-      .then(doPush("w", 0, true, true))
-      .then(doRead("y", 1))
-      .then(doPush("w", 0, false, false))
-      .then(doPush("w", 2, false, false))
-      .then(doRead("y", 3))                  // sf 1 < pinned 2: must be refused
+      .then(doPush("w", "A", 0, true, true))
+      .then(doRead("y", "A", 1))
+      .then(doPush("w", "A", 0, false, false))
+      .then(doPush("w", "A", 2, false, false))
+      .then(doRead("y", "A", 3))                  // sf 1 < pinned 2: must be refused
       .fail()
 
   run seqfloorPinInsufficientTest =
     init
-      .then(doPush("w", 0, true, true))      // fork A: seq2=cA, sf 2
-      .then(doRead("y", 1))                  // y pinned: counter 2, sf 2
-      .then(doPush("w", 0, false, false))    // fork B ...
-      .then(doPush("w", 2, false, false))
-      .then(doPush("w", 3, true, false))     // gen4: counter 4, sf 2, seq2=cB
-      .then(doRead("y", 4))                  // sf 2 >= 2, counter 4 > 2: accepted
+      .then(doPush("w", "A", 0, true, true))      // fork A: seq2=cA, sf 2
+      .then(doRead("y", "A", 1))                  // y pinned: counter 2, sf 2
+      .then(doPush("w", "A", 0, false, false))    // fork B ...
+      .then(doPush("w", "A", 2, false, false))
+      .then(doPush("w", "A", 3, true, false))     // gen4: counter 4, sf 2, seq2=cB
+      .then(doRead("y", "A", 4))                  // sf 2 >= 2, counter 4 > 2: accepted
       .expect(not(inv_p3_neverReuse))
 
   // The verifier's own discovery (2026-08-24): no second fork line needed.
@@ -516,20 +583,74 @@ module neg_sfonly {
   // pre-push state re-allocates the same seq itself.
   run selfReuseAfterCrashTest =
     init
-      .then(doPush("w", 0, true, true))      // seq2=cA acked; pin lags
-      .then(doPush("w", 0, true, false))     // host re-serves gen0: seq2=cB
+      .then(doPush("w", "A", 0, true, true))      // seq2=cA acked; pin lags
+      .then(doPush("w", "A", 0, true, false))     // host re-serves gen0: seq2=cB
       .expect(not(inv_p3_neverReuse))
 }
 
-// The full pin set: seqfloor plus the two-sided seq->digest memory. Every
-// known reuse construction must now fail, and P3 verifies at depth. Three
-// devices, because the read-side guard needs two independent writers racing
-// the same allocation from one base.
+// The full pin set, but ONE PIN PER URL ALIAS — the 0.1.0 implementation.
+// Every single-alias attack above is refused here; what falls is the
+// device's memory itself, which is now two memories that need not agree.
+// The precondition is only that both aliases have a pin of their own
+// (`init` pins every slot), after which the host chooses which one it
+// talks to.
+module neg_alias {
+  import sealed_v2(
+    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = false,
+    HONEST_HOST = false, CAS_COMPACT = true,
+    MAX_GENS = 6, DEVICES = Set("w", "z"), ALIASES = Set("A", "B")).* from "./sealed_v2"
+
+  // The reported bug, verbatim: counter 2 saved through A, counter 3
+  // saved through B, then the host replays counter 2 through A — and A's
+  // own pin, still at counter 2, takes it. The device's view of the vault
+  // went backwards without any check firing.
+  run staleAliasAcceptsRollbackTest =
+    init
+      .then(doPush("w", "A", 0, true, false))     // gen1: counter 2, via A
+      .then(doPush("w", "B", 1, true, false))     // gen2: counter 3, via B
+      .expect(pin.get(("w", "B")).counter == 3)
+      .then(doRead("w", "A", 1))                  // counter 2 again, via A: ACCEPTED
+      .expect(pin.get(("w", "A")).counter == 2)
+
+  // And the P3 form of it, which the verifier finds on its own: z forks
+  // the vault from genesis and re-binds seq 2; w's A-memory would refuse
+  // it, but the host serves the fork through B, whose memory never saw
+  // w's own seq 2.
+  run staleAliasAcceptsReboundSequenceTest =
+    init
+      .then(doPush("w", "A", 0, true, false))     // gen1: seq2=c1, in (w,A)'s memory
+      .then(doPush("z", "A", 0, true, false))     // gen2: z's fork, seq2=c2
+      .then(doPush("z", "A", 2, true, false))     // gen3: counter 3, sf 3
+      .then(doRead("w", "B", 3))                  // via B: nothing to refuse it
+      .expect(not(inv_p3_neverReuse))
+}
+
+// The full pin set: seqfloor plus the two-sided seq->digest memory, ONE
+// pin per device. Every known reuse construction must now fail, and P3
+// verifies at depth. Three devices, because the read-side guard needs two
+// independent writers racing the same allocation from one base; two
+// aliases, so the simulation also drives the vault through both URLs.
 module full {
   import sealed_v2(
-    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true,
+    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y", "z")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y", "z"), ALIASES = Set("A", "B")).* from "./sealed_v2"
+
+  // neg_alias's two traces, with the one shared pin: both refused.
+  run sharedPinRefusesRollbackThroughStaleAliasTest =
+    init
+      .then(doPush("w", "A", 0, true, false))
+      .then(doPush("w", "B", 1, true, false))
+      .then(doRead("w", "A", 1))                  // counter 2 < 3: refused
+      .fail()
+
+  run sharedPinRefusesReboundThroughOtherAliasTest =
+    init
+      .then(doPush("w", "A", 0, true, false))     // seq2=c1 in w's ONE memory
+      .then(doPush("z", "A", 0, true, false))
+      .then(doPush("z", "A", 2, true, false))
+      .then(doRead("w", "B", 3))                  // rebinds seq 2: refused via B too
+      .fail()
 
   // The fork writer above can no longer re-allocate seq2: its own
   // crash-lagged push left seq2 PENDING, so allocation skips to seq3. The
@@ -537,11 +658,11 @@ module full {
   // half existed — wedged the writer for good after any unreported push.
   run forkWriterReallocationSkippedTest =
     init
-      .then(doPush("w", 0, true, true))      // gen1: seq2=c1 acked, pin lags
-      .then(doRead("y", 1))
-      .then(doPush("w", 0, false, false))
-      .then(doPush("w", 2, false, false))
-      .then(doPush("w", 3, true, false))     // gen4: allocates seq3, NOT seq2
+      .then(doPush("w", "A", 0, true, true))      // gen1: seq2=c1 acked, pin lags
+      .then(doRead("y", "A", 1))
+      .then(doPush("w", "A", 0, false, false))
+      .then(doPush("w", "A", 2, false, false))
+      .then(doPush("w", "A", 3, true, false))     // gen4: allocates seq3, NOT seq2
       .expect(and {
         store.get(4).bundles.exists(b => b.seq == 3),
         not(store.get(4).seqfloor == 2),
@@ -553,19 +674,19 @@ module full {
   // soon as it rebinds a remembered seq.
   run reboundManifestRefusedOnReadTest =
     init
-      .then(doPush("w", 0, true, false))     // w's line: seq2=cA
-      .then(doRead("y", 1))                  // y remembers seq2->cA
-      .then(doPush("z", 0, true, false))     // z's line: seq2=cB (z saw no cA)
-      .then(doPush("z", 2, true, false))     // counter outruns y's pin
-      .then(doRead("y", 3))                  // rebinds seq2: refused
+      .then(doPush("w", "A", 0, true, false))     // w's line: seq2=cA
+      .then(doRead("y", "A", 1))                  // y remembers seq2->cA
+      .then(doPush("z", "A", 0, true, false))     // z's line: seq2=cB (z saw no cA)
+      .then(doPush("z", "A", 2, true, false))     // counter outruns y's pin
+      .then(doRead("y", "A", 3))                  // rebinds seq2: refused
       .fail()
 
   // The single-device variant: this device's own acknowledged push replayed
   // away by the host. It must not rebind seq2, and must not stop working.
   run selfReuseSkippedTest =
     init
-      .then(doPush("w", 0, true, true))      // seq2=c1 acked, pin lags
-      .then(doPush("w", 0, true, false))     // skips seq2, allocates seq3
+      .then(doPush("w", "A", 0, true, true))      // seq2=c1 acked, pin lags
+      .then(doPush("w", "A", 0, true, false))     // skips seq2, allocates seq3
       .expect(and {
         store.get(2).bundles.exists(b => b.seq == 3 and b.content == 2),
         not(store.get(2).bundles.exists(b => b.seq == 2 and b.content == 2)),
@@ -574,14 +695,15 @@ module full {
 
   // §7.4: a read settles the pending half. Here the lost acknowledgment is
   // recovered — the line binds seq2 to OUR content, so it becomes CONFIRMED.
+  // Through the OTHER alias, too: the pending half is shared like the rest.
   run pendingConfirmedByALaterReadTest =
     init
-      .then(doPush("w", 0, true, true))      // seq2=c1 acked, never learned
-      .expect(pend.get("w") == Map(2 -> 1))
-      .then(doRead("w", 1))
+      .then(doPush("w", "A", 0, true, true))      // seq2=c1 acked, never learned
+      .expect(pend.get(("w", "*")) == Map(2 -> 1))
+      .then(doRead("w", "B", 1))
       .expect(and {
-        pend.get("w") == Map(),
-        seen.get("w").get(2) == 1,
+        pend.get(("w", "*")) == Map(),
+        seen.get(("w", "*")).get(2) == 1,
       })
 
   // §8.4: the device's OWN next acknowledged push settles the guess the
@@ -590,11 +712,11 @@ module full {
   // what keeps P3's exception down to the window before that push.
   run anAcknowledgedPushConfirmsWhatItBurnedTest =
     init
-      .then(doPush("w", 0, true, true))      // seq2=c1, never learned
-      .then(doPush("w", 0, true, false))     // skips seq2, publishes seqfloor 3
+      .then(doPush("w", "A", 0, true, true))      // seq2=c1, never learned
+      .then(doPush("w", "A", 0, true, false))     // skips seq2, publishes seqfloor 3
       .expect(and {
-        pend.get("w") == Map(),
-        seen.get("w").get(2) == 1,           // burned -> confirmed
+        pend.get(("w", "*")) == Map(),
+        seen.get(("w", "*")).get(2) == 1,         // burned -> confirmed
         inv_p3_neverReuse,
       })
 
@@ -606,13 +728,13 @@ module full {
   // z's content at seq 2.
   run pendingDroppedIsForgottenNotCarvedOutTest =
     init
-      .then(doPush("w", 0, true, true))       // gen1: seq2=c1, never learned
-      .then(doPush("z", 0, true, false))      // gen2: z takes seq2 = c2
-      .expect(pend.get("w") == Map(2 -> 1))
-      .then(doRead("w", 2))                   // w cannot refuse this
+      .then(doPush("w", "A", 0, true, true))      // gen1: seq2=c1, never learned
+      .then(doPush("z", "A", 0, true, false))     // gen2: z takes seq2 = c2
+      .expect(pend.get(("w", "*")) == Map(2 -> 1))
+      .then(doRead("w", "A", 2))                  // w cannot refuse this
       .expect(and {
-        pend.get("w") == Map(),
-        seen.get("w").get(2) == 2,            // z's bundle, not w's own c1
+        pend.get(("w", "*")) == Map(),
+        seen.get(("w", "*")).get(2) == 2,         // z's bundle, not w's own c1
         trusted.get("w").filter(b => b.seq == 2).map(b => b.content) == Set(2),
         inv_p3_neverReuse,
       })
@@ -622,10 +744,10 @@ module full {
   // prerequisite-free complete snapshot that re-roots recovery.
   run emptyVaultKeepsNumberingTest =
     init
-      .then(doPush("w", 0, true, false))          // gen1: counter 2, sf 2, seq2
-      .then(doCompactStart("w", 1))
-      .then(doCompactCommitEmpty("w", false))     // gen2: counter 3, sf 2, no bundles
-      .then(doPush("w", 2, true, false))          // gen3: allocates seq 3, prereq-free
+      .then(doPush("w", "A", 0, true, false))          // gen1: counter 2, sf 2, seq2
+      .then(doCompactStart("w", "A", 1))
+      .then(doCompactCommitEmpty("w", false))          // gen2: counter 3, sf 2, no bundles
+      .then(doPush("w", "A", 2, true, false))          // gen3: allocates seq 3, prereq-free
       .expect(and {
         store.get(3).bundles.exists(b => b.seq == 3 and b.prereqs == Set()),
         inv_p3_neverReuse,
@@ -636,43 +758,45 @@ module full {
   // formal. The same rollback, with and without the wipe:
   run rollbackRefusedWithoutForgetTest =
     init
-      .then(doPush("w", 0, true, false))
-      .then(doRead("y", 1))
-      .then(doRead("y", 0))                       // rollback: refused
+      .then(doPush("w", "A", 0, true, false))
+      .then(doRead("y", "A", 1))
+      .then(doRead("y", "A", 0))                       // rollback: refused
       .fail()
 
   run forgetForfeitsRollbackProtectionTest =
     init
-      .then(doPush("w", 0, true, false))
-      .then(doRead("y", 1))
-      .then(doForget("y"))
-      .then(doRead("y", 0))                       // same rollback: ACCEPTED
-      .expect(pin.get("y").counter == 1)          // y is back at genesis
+      .then(doPush("w", "A", 0, true, false))
+      .then(doRead("y", "A", 1))
+      .then(doForget("y", "A"))
+      .then(doRead("y", "A", 0))                       // same rollback: ACCEPTED
+      .expect(pin.get(("y", "*")).counter == 1)        // y is back at genesis
 }
 
 // `full` with two devices, for the SYMBOLIC verifier only: three devices
 // stall Z3 around depth 5-6 (measured: 13h, no progress). What only three
 // devices reach — the read-side guard against two independent writers — is
-// covered by full's scripted scenario and the randomized simulation.
+// covered by full's scripted scenario and the randomized simulation. One
+// alias, without loss of generality: with SHARED_PIN every alias maps to
+// the same slot, so a second alias adds a choice that changes no state.
 module full2 {
   import sealed_v2(
-    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true,
+    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
 }
 
 // Honest host, CAS compaction: P4 must hold.
 module honest {
   import sealed_v2(
-    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true,
+    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = true, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
 
   run casCompactRetriesTest =
     init
-      .then(doCompactStart("w", 0))
-      .then(doPush("y", 0, true, false))     // tip moves under the compaction
-      .then(doCompactCommit("w", false))     // CAS must refuse
+      .then(doCompactStart("w", "A", 0))
+      .then(doPush("y", "A", 0, true, false))     // tip moves under the compaction
+      .then(doCompactCommit("w", false))          // CAS must refuse
       .fail()
 }
 
@@ -680,14 +804,14 @@ module honest {
 // interleaving now erases an acknowledged push. P4's negative control.
 module neg_force {
   import sealed_v2(
-    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true,
+    PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = true, CAS_COMPACT = false,
-    MAX_GENS = 6, DEVICES = Set("w", "y")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
 
   run forcePushErasesAckedPushTest =
     init
-      .then(doCompactStart("w", 0))
-      .then(doPush("y", 0, true, false))     // acked to y
-      .then(doCompactCommit("w", false))     // force-push replaces the branch
+      .then(doCompactStart("w", "A", 0))
+      .then(doPush("y", "A", 0, true, false))     // acked to y
+      .then(doCompactCommit("w", false))          // force-push replaces the branch
       .expect(not(inv_p4_durability))
 }

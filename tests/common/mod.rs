@@ -449,25 +449,38 @@ pub fn cli(cwd: &Path, identity: &Path, args: &[&str]) -> Output {
     cmd.output().expect("binary must be runnable")
 }
 
-/// The state directory the helper keeps for the single remote of `repo`
-/// (`<GIT_DIR>/sealed/<hash>`), and its pin directory.
-pub fn state_dir(repo: &Path) -> PathBuf {
-    let root = repo.join(".git").join("sealed");
-    let mut entries: Vec<PathBuf> = fs::read_dir(&root)
-        .expect("state root")
-        .map(|e| e.expect("dirent").path())
-        .collect();
-    assert_eq!(
-        entries.len(),
-        1,
-        "one remote, one state dir under {}",
-        root.display()
+/// The one entry of a directory, or None when it is absent or empty.
+fn single_entry(dir: &Path) -> Option<PathBuf> {
+    let entries: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(rd) => rd.map(|e| e.expect("dirent").path()).collect(),
+        Err(_) => return None,
+    };
+    assert!(
+        entries.len() <= 1,
+        "expected at most one entry under {}, found {entries:?}",
+        dir.display()
     );
-    entries.remove(0)
+    entries.into_iter().next()
 }
 
+/// `<GIT_DIR>/sealed` — the root of the helper's local state for `repo`.
+pub fn sealed_root(repo: &Path) -> PathBuf {
+    repo.join(".git").join("sealed")
+}
+
+/// The per-URL state directory the helper keeps for the single remote of
+/// `repo` (`<GIT_DIR>/sealed/urls/<hash>`: mirror, scratch, vault binding).
+pub fn state_dir(repo: &Path) -> PathBuf {
+    let urls = sealed_root(repo).join("urls");
+    single_entry(&urls).unwrap_or_else(|| panic!("one URL state dir under {}", urls.display()))
+}
+
+/// The directory of the single vault pin of `repo`
+/// (`<GIT_DIR>/sealed/vaults/<vault-id>`, holding `pin.json`). Shared by
+/// every URL of that vault.
 pub fn pin_dir(repo: &Path) -> PathBuf {
-    state_dir(repo).join("pin")
+    let vaults = sealed_root(repo).join("vaults");
+    single_entry(&vaults).unwrap_or_else(|| panic!("one vault pin under {}", vaults.display()))
 }
 
 /// Deterministic incompressible bytes (xorshift), for chunking tests.

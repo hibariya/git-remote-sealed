@@ -194,8 +194,8 @@ impl Prepared {
     }
 
     /// The pin the §7.4 battery ran against (`None` = first contact). This
-    /// is the strongest pin the repository holds for the vault, sibling
-    /// state directories included.
+    /// is the one pin the repository holds for the vault, whichever URL it
+    /// was saved through.
     pub fn prev_pin(&self) -> Option<&pinstore::Pin> {
         self.prev_pin.as_ref()
     }
@@ -238,12 +238,23 @@ impl Inspection {
 pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection, ReadError> {
     // §6.1: current committed tree (the mirror was reset, not merged).
     let tree = vault.fetch()?;
-    let prev_pin = pinstore::load(&vault.pin_dir())?;
+    // §7.4: the vault this URL is bound to (None = nothing was ever pinned
+    // through this spelling), and the pin that vault has — ONE pin per
+    // vault, shared by every URL that reaches it.
+    let pins = vault.pins()?;
+    let expected_vault = pins.association(vault.url())?;
+    let prev_pin = match &expected_vault {
+        Some(vault_id) => pins.load_vault(vault_id)?,
+        None => None,
+    };
+    // A binding whose pin file is gone still says a vault lived at this
+    // URL: an empty remote there is a reset, not first contact.
+    let pinned = expected_vault.is_some();
 
     let Some(tree) = tree else {
         // §7.4: a pinned reader MUST refuse an empty vault (no manifest) —
         // otherwise a host could reset the pin via re-initialization.
-        pinstore::check_empty_vault(prev_pin.as_ref())?;
+        pinstore::check_empty_vault(pinned)?;
         return Ok(Inspection::Empty);
     };
 
@@ -268,7 +279,7 @@ pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection,
         // A committed tree with no manifest and no bundles is an empty
         // vault for §7.4's purposes ("no manifest at all"), whatever else
         // the tree holds.
-        pinstore::check_empty_vault(prev_pin.as_ref())?;
+        pinstore::check_empty_vault(pinned)?;
         return Ok(Inspection::Empty);
     };
 
@@ -286,13 +297,25 @@ pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection,
     // passed check_hint (== FORMAT_VERSION) and manifest::parse accepts
     // `format 2` only, so hint == manifest format on every success path.
 
+    // §7.4 vault identity, first: a URL bound to a vault must keep serving
+    // that vault. This runs BEFORE any pin is looked up by the manifest's
+    // own identity, or a substituted vault would simply meet a fresh pin.
+    if let Some(expected) = &expected_vault {
+        if *expected != manifest.vault_id {
+            return Err(PinError::VaultMismatch {
+                pinned: expected.clone(),
+                seen: manifest.vault_id.clone(),
+            }
+            .into());
+        }
+    }
     // §7.4: pins are per (repository, VAULT). First contact through THIS
-    // URL spelling still inherits the strongest pin the repository holds
-    // for the vault identity the manifest declares — a respelled remote
-    // must not reset rollback protection.
+    // URL spelling still meets the pin the repository holds for the vault
+    // identity the manifest declares — a respelled remote, or an SSH
+    // spelling of an HTTPS one, must not reset rollback protection.
     let prev_pin = match prev_pin {
         Some(pin) => Some(pin),
-        None => pinstore::find_by_vault_id(&vault.sealed_root(), &manifest.vault_id)?,
+        None => pins.load_vault(&manifest.vault_id)?,
     };
 
     // ...including the §7.4 trust-on-first-use battery.
@@ -393,7 +416,7 @@ pub fn apply(
     // skipped forever — its objects are not ref tips, so §6.5's re-apply
     // trigger would never fire. A crash before this line simply re-runs
     // the full battery next time (idempotent).
-    pinstore::save(&vault.pin_dir(), &prepared.next_pin)?;
+    vault.save_pin(&prepared.next_pin)?;
     Ok(())
 }
 
