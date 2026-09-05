@@ -1,6 +1,6 @@
 [package]
 name = "git-remote-sealed"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 description = "An end-to-end encrypted git remote: back up a repository to a host that can read nothing"
 license = "MIT"
