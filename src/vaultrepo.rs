@@ -173,7 +173,10 @@ impl VaultRepo {
     /// the §6.1 lock. Blocks until the lock is available.
     pub fn open(git_dir: &Path, url: &str) -> Result<VaultRepo, GitError> {
         let base = state_dir(git_dir, url);
-        fs::create_dir_all(&base).map_err(|e| GitError::Io(format!("{}: {e}", base.display())))?;
+        // A durable pin is useless if its newly created ancestors vanish
+        // after power loss. Save the state-directory entries first.
+        crate::durable::create_dir_all(&base)
+            .map_err(|e| GitError::Io(format!("{}: {e}", base.display())))?;
 
         let lock_path = base.join("lock");
         let lock = fs::OpenOptions::new()

@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use crate::json::Json;
@@ -396,16 +397,32 @@ pub fn find_by_vault_id(sealed_root: &Path, vault_id: &str) -> Result<Option<Pin
     Ok(best)
 }
 
-/// Persist the pin (write-then-rename, so a crash never leaves a truncated
-/// pin — §7.4 makes this file normative validation input).
+/// Persist the pin before returning: save the temporary file's contents,
+/// atomically rename it, then save the directory entry. Writers must not
+/// upload until this succeeds (§8.4's pending binding).
 pub fn save(dir: &Path, pin: &Pin) -> Result<(), PinError> {
-    fs::create_dir_all(dir).map_err(|e| PinError::Io(format!("{}: {e}", dir.display())))?;
+    save_with_sync(dir, pin, fs::File::sync_all)
+}
+
+fn save_with_sync(
+    dir: &Path,
+    pin: &Pin,
+    sync: impl Fn(&fs::File) -> std::io::Result<()>,
+) -> Result<(), PinError> {
+    crate::durable::create_dir_all(dir)
+        .map_err(|e| PinError::Io(format!("{}: {e}", dir.display())))?;
     let tmp = dir.join(format!("{PIN_FILE}.tmp"));
     let path = dir.join(PIN_FILE);
-    fs::write(&tmp, pin_to_json(pin).render())
+    let mut file =
+        fs::File::create(&tmp).map_err(|e| PinError::Io(format!("{}: {e}", tmp.display())))?;
+    file.write_all(pin_to_json(pin).render().as_bytes())
         .map_err(|e| PinError::Io(format!("{}: {e}", tmp.display())))?;
+    sync(&file).map_err(|e| PinError::Io(format!("sync {}: {e}", tmp.display())))?;
+    drop(file);
     fs::rename(&tmp, &path).map_err(|e| PinError::Io(format!("{}: {e}", path.display())))?;
-    Ok(())
+    let directory =
+        fs::File::open(dir).map_err(|e| PinError::Io(format!("{}: {e}", dir.display())))?;
+    sync(&directory).map_err(|e| PinError::Io(format!("sync {}: {e}", dir.display())))
 }
 
 /// Delete the pin file (a writer withdrawing a binding after a definitive
@@ -414,7 +431,8 @@ pub fn save(dir: &Path, pin: &Pin) -> Result<(), PinError> {
 pub fn remove(dir: &Path) -> Result<(), PinError> {
     let path = dir.join(PIN_FILE);
     match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
+        Ok(()) => crate::durable::sync_dir(dir)
+            .map_err(|e| PinError::Io(format!("sync {}: {e}", dir.display()))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(PinError::Io(format!("{}: {e}", path.display()))),
     }
@@ -816,8 +834,9 @@ mod tests {
 
     #[test]
     fn save_load_round_trip() {
-        let dir = std::env::temp_dir().join(format!("sealed-rs-pin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let root = std::env::temp_dir().join(format!("sealed-rs-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("state").join("pin");
         let mut pin = first_contact();
         pin.sequence_memory.insert((1 << 63) - 1, D_B.into());
         pin.pending.insert(7, D_A.into());
@@ -829,7 +848,39 @@ mod tests {
         remove(&dir).expect("removable");
         assert_eq!(load(&dir).expect("readable"), None);
         remove(&dir).expect("absence is fine");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failed_sync_never_reports_a_successful_pin_save() {
+        let dir = std::env::temp_dir().join(format!("sealed-rs-pinsync-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let old = first_contact();
+        let mut pending = old.clone();
+        pending.pending.insert(3, D_A.into());
+
+        for fail_directory in [false, true] {
+            save(&dir, &old).expect("initial pin");
+            let result = save_with_sync(&dir, &pending, |file| {
+                if file.metadata()?.is_dir() == fail_directory {
+                    Err(std::io::Error::other("injected disk sync failure"))
+                } else {
+                    file.sync_all()
+                }
+            });
+            assert!(matches!(result, Err(PinError::Io(_))));
+            // Failure before rename preserves the old pin. Failure after
+            // rename may expose the new pin, but must still stop the push:
+            // its directory entry has not been confirmed durable.
+            let visible = if fail_directory { &pending } else { &old };
+            assert_eq!(load(&dir).expect("valid pin").as_ref(), Some(visible));
+
+            // A leftover temporary file or an uncertain rename must not
+            // prevent the next attempt from saving the binding.
+            save(&dir, &pending).expect("retry");
+            assert_eq!(load(&dir).expect("saved pin"), Some(pending.clone()));
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

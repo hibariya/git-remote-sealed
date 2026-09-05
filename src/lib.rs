@@ -16,6 +16,7 @@ pub mod bundling;
 pub mod cli;
 pub mod compact;
 pub mod crypt;
+mod durable;
 pub mod helper;
 mod json;
 pub mod manifest;
