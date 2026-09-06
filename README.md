@@ -90,9 +90,14 @@ remain unreadable to that key until compaction.
 
 ## The format and protocol
 
+Start with [How a sealed vault works](docs/OVERVIEW.md) for a short explanation
+of the files, push, fetch, and compaction.
+
 [docs/FORMAT.md](docs/FORMAT.md) specifies the on-remote format completely enough to build another implementation from, with no reference to this code. It carries its own threat model (§1, §10) and a disaster-recovery appendix.
 
 For the protocol core (sequence allocation, the trust-on-first-use pin, compaction) the machine-checked Quint model in [spec/](spec/) is normative: where the prose and the model disagree, the model wins. See [spec/README.md](spec/README.md) for what is proved, at what bounds, and what is deliberately left to simulation.
+
+[Design notes](docs/DESIGN-NOTES.md) explain why the individual rules exist.
 
 ## Contributing
 

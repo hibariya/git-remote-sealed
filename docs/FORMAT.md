@@ -1,5 +1,10 @@
 # Sealed Vault Format, version 2
 
+Start with the [short overview](OVERVIEW.md) for an explanation of the
+files and operations. This document is the format reference;
+[design notes](DESIGN-NOTES.md) hold the background explanations and history.
+The [reorganization map](FORMAT-REORGANIZATION.md) records where text moved.
+
 This document specifies the on-remote format used by `git-remote-sealed`:
 an end-to-end encrypted git remote ("vault") built from git bundles and
 age encryption. It is written so that an independent implementation can be

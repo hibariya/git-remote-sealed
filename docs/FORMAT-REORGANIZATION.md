@@ -31,3 +31,10 @@ Notes 7d and 7h were kept in the reference despite being under a heading
 calling them background: they contain MUST/SHOULD language. Security limits,
 exceptions, and the authority split remain in the reference; the background
 notes supplement them. No ambiguity was resolved by rewriting a rule.
+
+## New explanatory material
+
+The separately added [overview](OVERVIEW.md) summarizes §§3–9 and points
+to §10 for security limits. It explicitly defers to FORMAT.md and its
+existing authority split with the model. README.md and the reference's
+introduction link to it; no existing rule wording was rewritten.
