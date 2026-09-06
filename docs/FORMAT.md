@@ -137,19 +137,7 @@ lifetime. Bundle payload version follows it strictly (§4.3). The vault
 repository *itself* is host-default (any object format); only the source
 repository's format matters here.
 
-**Notes to §3.** Background; nothing here adds a rule.
-
-**3a.** Without this rule, deleting one file would make the vault read as
-empty. The next innocent writer would then rebuild a manifest containing only
-its own refs — turning one deleted file into propagating ref loss.
-
-**3b.** The bundle namespace is owned by this spec, so such a name can only be
-a decoy or corruption, never a future extension. A hard error would let a
-malicious host wedge every operation with one planted file, since reading
-precedes every write and every repair.
-
-**3c.** So host-planted decoys cannot ride the preservation rule across
-compaction's history rewrite, or poison the recovery procedure indefinitely.
+Background: [design notes for §3](DESIGN-NOTES.md#section-3).
 
 ## 4. Bundle files
 
@@ -192,16 +180,7 @@ valid bundle name — see §3's carve-out. [4a]
   NOT be labeled `-full`, even when it happens to have zero
   prerequisites. [4b]
 
-**Notes to §4.1.** Background; nothing here adds a rule.
-
-**4a.** Canonical form is load-bearing: it gives every logical value exactly
-one spelling. Together with §7.2's rule that no two `bundle` lines share a
-sequence number (with or without `-full`), every sequence number resolves to
-at most one tree entry.
-
-**4b.** Appendix A's recovery relies on this rule: "start from the highest
-`-full`" is only sound if `-full` always means the whole vault, and if every
-generation with bundles is rooted in one.
+Background: [design notes for §4.1](DESIGN-NOTES.md#section-4-1).
 
 ### 4.2 Chunking
 
@@ -253,16 +232,7 @@ Each decrypted file is a git bundle subject to:
   (Bundles accumulate stale ref claims — e.g. pre-rebase tips — by
   design.)
 
-**Notes to §4.3.** Background; nothing here adds a rule.
-
-**4c.** Why not v3 everywhere: Appendix A wants the widest stock-git
-compatibility, and v2 bundles are readable by every git that can run the
-recipe at all.
-
-**4d.** git records whatever names it is given at creation time, so a writer
-that bundles via temporary refs must rewrite the header afterwards. That is
-possible because the header is plain text, terminated by the first blank line;
-the binary packfile follows it.
+Background: [design notes for §4.3](DESIGN-NOTES.md#section-4-3).
 
 ## 5. Encryption
 
@@ -280,12 +250,7 @@ that needs an identity. [5a]
 There is no deterministic-encryption requirement anywhere in this
 format.
 
-**Notes to §5.** Background; nothing here adds a rule.
-
-**5a.** In principle the recipient/identity split allows an asymmetry: a
-device holding only recipients could *write* backups without ever being able
-to read the vault. Treat write-only operation as a possible future profile,
-not something to implement from this document.
+Background: [design notes for §5](DESIGN-NOTES.md#section-5).
 
 ## 6. Reader algorithm (fetch / restore)
 
@@ -339,11 +304,7 @@ not something to implement from this document.
    object after re-application means a corrupt or incomplete vault and
    MUST be a loud error.
 
-**Notes to §6.** Background; nothing here adds a rule.
-
-**6a.** For example `git bundle verify` followed by `git bundle unbundle`:
-`unbundle` alone performs no prerequisite check, and `verify` is what asserts
-§4.3's promise.
+Background: [design notes for §6](DESIGN-NOTES.md#section-6).
 
 ### 6.7 The expected file set
 
@@ -471,20 +432,7 @@ become read-only — when the manifest it read contained any line whose first
 token it does not recognize. This makes a 2.0 tool read-only against a 2.1
 vault, which is the safe outcome. [7c]
 
-**Notes to §7.3.** Background; nothing here adds a rule.
-
-**7a.** This is safe because producing a manifest ciphertext that decrypts at
-all requires knowing a vault recipient (§5, §10), which the host does not, so
-the host cannot inject lines. It is how future 2.x versions add fields without
-breaking deployed readers.
-
-**7b.** Arity errors on recognized tokens fail parsing outright, which would
-brick deployed readers instead of degrading them; new line types degrade them
-to read-only via the next rule, which is the intended failure mode.
-
-**7c.** A writer regenerates the manifest from the fields it knows, so a
-writer that does not understand an extension line would silently delete that
-line on its next push.
+Background: [design notes for §7.3](DESIGN-NOTES.md#section-7-3).
 
 ### 7.4 Trust on first use, and the per-vault memory
 
@@ -587,39 +535,6 @@ generation — empty *bundle list* — is not an empty vault and is valid,
 **7d.** The twin check is a MUST, not a SHOULD: the formal model's proofs
 assume it unconditionally.
 
-**7e.** Two kinds of own binding reach the memory, and neither can lose
-objects the way an unapplied manifest binding could. The bundle a write
-published is applied by construction — the writer built it from its own
-repository. A number the writer's `seqfloor` burned was never published at
-all, so no bundle exists to apply and none ever can (§8.4 note 8e); that
-entry exists only to restore the rebinding check over the number.
-
-**7f.** Each entry is a few dozen bytes per allocated sequence number,
-forever, and pruning would reopen exactly the window this rule closes.
-
-**7g. What the pending half costs, stated plainly.** A number that goes
-pending and then drops out unconfirmed leaves this device's memory without
-ever having been evidence, so a fork that binds that number to different
-content is not caught *by this device, by this check*. That is not a choice
-between safe and unsafe but between two failure modes the writer cannot tell
-apart: its write may have landed and been forked away, or may never have
-landed and the number legitimately taken by another writer. Treating the
-hypothesis as evidence refuses the second case too — an ordinary two-writer
-race after a dropped connection — and leaves §7.5 `forget`, which ACCEPTS
-real attacks, as the only way out.
-
-The exposure is bounded in time, not permanent. It lasts only until this
-device's next acknowledged write, which confirms the number by burning it
-(§8.4). Before that, the ambiguity is genuine — a concurrent writer really may
-be allocating the same number from the same base at that moment. After it, the
-full rebinding check applies again. Detection also survives elsewhere
-throughout: the counter, twin and `seqfloor` checks are unaffected, and any
-device that read the landed generation holds the binding CONFIRMED and still
-refuses the fork. In the formal model this limit is not an exception to
-`inv_p3_neverReuse` but a consequence of it: giving up a pending binding
-drops the device's own unconfirmed claim along with it (`forgetOwn`), so
-one sequence number never carries two claims.
-
 **7h.** The divergence is silent because every check passes against the
 pin it is run against: through URL A the repository saved counter 2,
 through URL B counter 3, and a replay of counter 2 through A meets A's
@@ -634,6 +549,8 @@ records that contradict each other (an equal counter with a different
 manifest digest, a number bound to two digests, a different
 objectformat): those are a fork or rollback already observed, not a
 tie to break.
+
+Background: [design notes for §7.4](DESIGN-NOTES.md#section-7-4).
 
 ### 7.5 Discarding the pin
 
@@ -783,37 +700,7 @@ Unconverted bytes are load-bearing: age ciphertexts are binary, and a
 small manifest can pass git's text heuristic, so an inherited
 `autocrlf` setting silently corrupts it.
 
-**Notes to §8.** Background; nothing here adds a rule.
-
-**8a.** git bundles cannot represent a shallow boundary, and `git bundle
-create` does not reliably error on one — it can emit a bundle whose history
-cannot be reconstructed, while reporting success.
-
-**8b.** Fail-closed: a host that keeps serving the stale state wedges this
-writer; it never causes a sequence reuse. The model's verifier found the
-attack this guard closes.
-
-**8c.** An unreported push is an everyday event on a mobile connection, and
-refusing would wedge every later push and compaction — with §7.5 `forget`,
-which ACCEPTS the attacks this format defends against, as the only escape.
-
-**8d.** Why initialization is exempt: creating a pin just to hold the
-pending binding would break the retry. §7.4 requires a pinned reader to
-refuse an empty vault, so a pin holding nothing but a pending binding
-would turn a genuinely empty remote into a hard error on the second
-attempt. Nothing is lost by the exemption — there is no pinned state to
-protect, and a re-attempt after an unreported initialization meets a
-branch that now exists, which the non-forced push refuses.
-
-**8e.** Why publishing the `seqfloor` burns them: the generation just written
-does not list them (its bundle list is the base's, whose sequences all sit at
-or below a lower `seqfloor`, plus the writer's own), no ancestor lists them
-for the same reason, and every later writer allocates above a `seqfloor`
-already past them. A concurrent writer that had taken one would have shown it
-in this writer's own base, where §7.4 settled it instead. From that point a
-manifest binding one of these numbers to anything else is a fork — which is
-what keeps the exposure §7.4 describes down to the window before the next
-acknowledged write.
+Background: [design notes for §8](DESIGN-NOTES.md#section-8).
 
 ## 9. Compaction
 
@@ -862,11 +749,7 @@ The host may internally retain unreachable objects for a while after
 compaction. That retention is outside this format's control — which is
 precisely why §6.4 forbids applying resurrected files.
 
-**Notes to §9.** Background; nothing here adds a rule.
-
-**9a.** Why parentless: a normal commit would keep every pruned ciphertext
-file reachable in the vault's own git history, so deleted content would never
-leave the host.
+Background: [design notes for §9](DESIGN-NOTES.md#section-9).
 
 ## 10. Security considerations
 
@@ -999,42 +882,26 @@ recipe is almost always what you want.
 
 ## Appendix B. Version history
 
-- **2** (2026-09-02): the first published version. SHA-1 and SHA-256
-  source repositories via the `objectformat` line, with strict
-  bundle-version mapping; unpadded, value-bounded sequence and chunk
-  numbers, apply order defined numerically, canonical form (no leading
-  zeros) required, with the read-tolerant/write-strict rule for near-miss
-  names; chunk counts on `bundle` lines and the expected-file-set rule
-  (§6.7); the `seqfloor` line; `-full` keyed to bundle-list emptiness;
-  zero-ref compaction (manifest-only generations); trust-on-first-use
-  pinning of vault identity, counter, manifest-ciphertext digest, format,
-  objectformat and `seqfloor`, plus the normative **sequence memory**
-  (seq→digest, read- and write-side) — the last found by the formal
-  model, which this version carries as the normative companion for the
-  protocol core (§2).
-- **Errata** (2026-09-05): §7.4 allowed pins keyed by remote URL with a
-  per-vault fallback on first contact. Once two URLs of one vault each
-  held a pin, their memories diverged and a host could replay an old
-  generation through the staler URL (note 7h; the model's `neg_alias`
-  control). The pin is now one per vault identity, each URL keeps a
-  durable binding to its vault, §6.1's serialization spans every URL of
-  a repository, and §7.5's discard is scoped by binding. Reader-local
-  state only: no wire-format change.
-- **Errata** (2026-09-04), from an adversarial review of the changes made
-  after the previous one: §7.4's
-  persist-after-apply rule contradicted §8.4's burn rule, which confirms
-  numbers whose bundles were never published — the rule is now scoped to
-  bindings learned from a manifest, with note 7e covering the writer's
-  own (M1); §8.4's binding-timing MUST now states the initialization
-  exception both implementations always had, with note 8d for why a pin
-  cannot be created there (L4); §10 said sequence numbers leak the
-  lifetime push count, but since allocation skips unreported numbers they
-  leak the *attempt* count (L5). No wire-format change.
-- **Appendix A errata** (2026-09-03): the incremental-apply commands used
-  a bundle path relative to the current directory while running under
-  `git -C recovered.git`, which resolved it inside `recovered.git` and
-  failed; corrected to `../full.bundle` / `../inc.bundle`. Added a
-  warning that the chunk-reassembly loop must be run only for chunked
-  names (its `> "$n"` truncates a whole file). No normative change —
-  the recovery procedure is not part of the wire format; found by the
-  Rust reference's test that executes Appendix A verbatim.
+See [version history](DESIGN-NOTES.md#appendix-b-version-history).
+
+[3a]: DESIGN-NOTES.md#note-3a
+[3b]: DESIGN-NOTES.md#note-3b
+[3c]: DESIGN-NOTES.md#note-3c
+[4a]: DESIGN-NOTES.md#note-4a
+[4b]: DESIGN-NOTES.md#note-4b
+[4c]: DESIGN-NOTES.md#note-4c
+[4d]: DESIGN-NOTES.md#note-4d
+[5a]: DESIGN-NOTES.md#note-5a
+[6a]: DESIGN-NOTES.md#note-6a
+[7a]: DESIGN-NOTES.md#note-7a
+[7b]: DESIGN-NOTES.md#note-7b
+[7c]: DESIGN-NOTES.md#note-7c
+[7e]: DESIGN-NOTES.md#note-7e
+[7f]: DESIGN-NOTES.md#note-7f
+[7g]: DESIGN-NOTES.md#note-7g
+[8a]: DESIGN-NOTES.md#note-8a
+[8b]: DESIGN-NOTES.md#note-8b
+[8c]: DESIGN-NOTES.md#note-8c
+[8d]: DESIGN-NOTES.md#note-8d
+[8e]: DESIGN-NOTES.md#note-8e
+[9a]: DESIGN-NOTES.md#note-9a
