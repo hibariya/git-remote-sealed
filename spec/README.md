@@ -112,8 +112,9 @@ adds a nondeterministic choice that changes no state; it would only
 cost the symbolic verifier branching. The two-alias behaviour is
 exercised where it can differ — `neg_alias` (the verifier finds the
 attack) and `full` (scripted refusals plus the 10k-trace simulation
-with both aliases in `step`). The depth-4 proof has NOT been re-run
-after the alias change (2026-09-05); the fast lane has.
+with both aliases in `step`). Both depth-4 proofs were re-run after
+the alias change (2026-09-06): `full2` NoError in ~40 min, `honest` in
+~25 min.
 
 ## Properties
 
