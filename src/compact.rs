@@ -328,6 +328,8 @@ fn new_set(
         }
         SetChange::Upgrade { .. } => unreachable!("handled above"),
     }
+    // The legacy list is judged against the set this generation declares.
+    writer::check_legacy_config(&set, cfg)?;
     // Rebuild in the set's (bytewise) order from parsed recipients: the
     // manifest's own members were parsed by `writable_set`, the change's
     // key is already a `Recipient`.

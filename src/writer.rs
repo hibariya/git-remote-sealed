@@ -430,9 +430,10 @@ pub(crate) fn recipients_of(m: &Manifest) -> Result<Vec<Recipient>, WriteError> 
 }
 
 /// What a write against an existing vault must establish before it
-/// allocates anything: §7.3 (read-only against unknown lines), §5/§8 (no
-/// push to a pre-recipient vault), and the legacy-config consistency check.
-/// Returns the set to encrypt to — the manifest's.
+/// allocates anything: §7.3 (read-only against unknown lines) and §5/§8
+/// (no push to a pre-recipient vault). Returns the set to encrypt to — the
+/// manifest's. The caller runs `check_legacy_config` against the set it
+/// will actually declare (a push: this one; enroll/revoke: the changed one).
 pub(crate) fn writable_set(p: &Prepared, cfg: &WriterConfig) -> Result<Vec<Recipient>, WriteError> {
     if p.writer_must_be_read_only() {
         return Err(WriteError::ReadOnlyVault);
@@ -444,14 +445,14 @@ pub(crate) fn writable_set(p: &Prepared, cfg: &WriterConfig) -> Result<Vec<Recip
             stanzas: p.manifest_stanzas(),
         });
     }
-    check_legacy_config(&m.recipients, cfg)?;
     recipients_of(m)
 }
 
 /// `sealed.recipients` is not an input any more, but it is not ignored
-/// blindly either: a key it names that the vault does not have is refused
-/// (the user meant to have it; `enroll` is how), and a list the vault
-/// already covers just earns a reminder to remove it.
+/// blindly either: a key it names that the generation being written will
+/// not have is refused (the user meant to have it; `enroll` is how — and
+/// an `enroll` of that very key passes, since `declared` is the new set),
+/// and a list the vault covers just earns a reminder to remove it.
 pub(crate) fn check_legacy_config(
     declared: &BTreeSet<String>,
     cfg: &WriterConfig,
@@ -775,6 +776,7 @@ impl Ctx<'_> {
         // the set to encrypt to is the manifest's (§8 "Recipient set").
         let recipients = writable_set(p, self.cfg)?;
         let m = p.manifest();
+        check_legacy_config(&m.recipients, self.cfg)?;
         // §8 preamble: object format equality.
         if self.local_format != m.object_format.as_str() {
             return Err(WriteError::ObjectFormatMismatch {
