@@ -22,6 +22,10 @@ git remote add origin sealed::git@github.com:me/my-secret-repo.git
 git push -u origin main
 ```
 
+The first push creates the vault, encrypted to this device's key. The
+vault itself records which keys can read it; there is nothing else to
+configure. Add a recovery key next (see below) — key loss is unrecoverable.
+
 ## Platforms
 
 Linux and macOS only for now.
@@ -64,29 +68,60 @@ Alternatively, build it yourself:
 cargo install --git https://github.com/hibariya/git-remote-sealed
 ```
 
-## Additional Age Encryption Recipients
+## Adding a device or a recovery key
 
-Encrypt to more than one key if the vault matters (one of them an offline recovery key you keep somewhere else):
-
-```shell
-git config --add sealed.recipients age1...   # the other key's PUBLIC half
-```
-
-`sealed.recipients` is multi-valued and git merges every config scope, so set it per repository and check what is actually in force:
+The set of keys a vault is encrypted to lives inside the vault, in its
+encrypted manifest. To add one, run this on any device that can already
+read the vault, with the new key's PUBLIC half:
 
 ```shell
-git config --show-origin --get-all sealed.recipients
+git-remote-sealed enroll age1...
 ```
 
-When adding a recipient to an existing vault, run `git-remote-sealed compact`
-on a device that can read its history before cloning with the new key.
-A normal push encrypts only new files to the added recipient; old bundles
-remain unreadable to that key until compaction.
+`enroll` rewrites the vault as one snapshot encrypted to the new set, so
+the added key reads the whole history from its first clone. Every other
+device learns the new set on its next fetch; nothing is configured
+anywhere else. Encrypt to at least two keys if the vault matters, one of
+them an offline recovery key you keep somewhere else.
+
+To add a device: generate a key there (`age-keygen`), enroll its public
+half here, then clone there. Keys never move between devices, and
+`git-remote-sealed info` on either side shows what is recorded.
+
+To remove a key, `git-remote-sealed revoke age1...` compacts the vault
+without it. Removal is not erasure: the host may keep earlier
+generations, which that key could still read.
 
 ## More commands
 
-- `git-remote-sealed info` — shows your vault setup, and the steps to add a new device (keys never move between devices).
+- `git-remote-sealed info` — the identity, what this repository remembers about the vault, and the recipients the vault records (this device marked).
+- `git-remote-sealed enroll <age1...>` — add a recipient and compact, so the whole history becomes readable by it.
+- `git-remote-sealed revoke <age1...>` — remove a recipient and compact (`--yes` to remove this device's own key).
+- `git-remote-sealed upgrade` — record the recipient set in a vault written by 0.2.x (see below).
 - `git-remote-sealed compact` — rewrites the vault as one snapshot.  Deleted history really disappears from the host here.
+- `git-remote-sealed forget --yes` — discard this repository's memory of a vault you deliberately re-created. Read its warning first.
+
+## Upgrading from 0.2.x
+
+Vaults written by 0.2.x do not record their recipients. Run this once
+per vault, from any device that can read it:
+
+```shell
+git-remote-sealed upgrade
+```
+
+Reads (clone, fetch) work without it; a push to a not-yet-upgraded vault
+is refused and tells you to run it. The recorded set is this device's
+identity plus its `sealed.recipients`, and it must match the number of
+keys the vault is already encrypted to. A mismatch is refused with both
+counts, so a stale global entry cannot be sealed in by accident.
+Afterwards remove `sealed.recipients` everywhere (`git config
+--show-origin --get-all sealed.recipients`): a key it names that the
+vault does not have is refused on write; use `enroll` instead.
+
+A vault written by 0.3.0 still reads on 0.2.x, but 0.2.x refuses to push
+to it, as the format requires for manifest lines it does not know.
+Upgrade each device before it pushes again. See [CHANGELOG.md](CHANGELOG.md).
 
 ## The format and protocol
 
