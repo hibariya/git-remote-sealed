@@ -1,0 +1,10 @@
+format 2
+objectformat sha1
+vault b20c8486e70edf136f4e393d2831383ad8e81ac40085801c5c36a5a70883af01
+counter 2
+seqfloor 2
+bundle 1-full.bundle.age acccc7a18a7677c5e9303d1c30cad02f5672d881a5f7456dc843e60821a2abaf
+bundle 2.bundle.age 50e8d018d0535d34ec0579eb7507633420918b6281765916b5a82ca320e283f0
+@refs/heads/main HEAD
+f689c27b03db53e04ad0725af7f9c9a06c36e4b2 refs/heads/main
+bdc519cec116a88311911c0c52d34d58b54481e8 refs/tags/v1
