@@ -276,6 +276,14 @@ check reports no attack, only a writer to fix. Readers MAY apply the
 same check to bundles. With non-X25519 recipients present the counts
 are not comparable and the check does not apply.
 
+Counting stanzas needs one care: age writes random **grease** stanzas
+into some headers on purpose, and a grease stanza is not a recipient.
+Implementations MUST exclude grease from every count in this
+specification. The age reference implementations mark grease with a
+stanza tag ending in `-grease`; a plugin stanza is otherwise
+shape-identical, so an implementation that cannot tell the two apart
+MUST report the count as undeterminable rather than guess.
+
 There is no deterministic-encryption requirement anywhere in this
 format.
 
@@ -630,10 +638,12 @@ document the rule.
 exactly the recipient set declared by the manifest it validated in
 step 1, and MUST carry that set unchanged into the manifest it writes
 (§5). A vault-initializing write declares the set it encrypts to,
-which MUST contain at least one recipient. A writer that reads a
-pre-recipient manifest MUST NOT proceed past step 1 — the only write
-allowed against such a vault is the upgrade of §9.2 — and SHOULD tell
-the user so. Changing the set is §9.1, never a push.
+which MUST contain at least one recipient. A writer that cannot
+encrypt to a recipient type the manifest declares MUST refuse to write
+rather than encrypt to a subset. A writer that reads a pre-recipient
+manifest MUST NOT proceed past step 1 — the only write allowed against
+such a vault is the upgrade of §9.2 — and SHOULD tell the user so.
+Changing the set is §9.1, never a push.
 
 1. Fetch the vault branch; validate and read the manifest as in
    §6.1–6.4 (an empty vault — no manifest, no bundles — reads as no
@@ -812,7 +822,10 @@ and readable by a removed one, and §5 requires one set per generation.
 The new set MUST be non-empty. Removing the writer's own recipient is
 allowed — the writer can still validate and apply the vault it read —
 but implementations SHOULD require explicit confirmation, since the
-device loses read access to the result.
+device loses read access to the result. Adding a recipient the set
+already has, or removing one it does not have, changes nothing and
+MUST NOT write a generation. Like every other write, a set change is
+refused against a pre-recipient vault (§5): §9.2 comes first.
 
 A zero-ref vault (manifest-only generation, above) changes its set the
 same way, with no bundle: the rewritten manifest is encrypted to the
@@ -834,8 +847,16 @@ determined, the configured set's size MUST equal it. A smaller set
 would lock out a current reader; a **larger** set is just as invalid —
 it is almost always a stale configuration, and recording it would make
 the mistake the vault's truth. Both MUST be refused, reporting both
-counts. When the count cannot be determined (non-X25519 stanzas), the
-implementation MUST have the user confirm the set explicitly.
+counts. When the count cannot be determined (non-X25519 stanzas, or a
+header the implementation cannot read), the implementation MUST have
+the user confirm the set explicitly.
+
+The count check is necessary, not sufficient: a stale key that
+*replaces* a real one keeps the count equal and still locks a current
+reader out. Implementations MUST show the set they are about to record
+before or as they record it, so the user can compare it with what the
+other devices report, and SHOULD say that this comparison is the
+user's to make.
 
 The upgrade MUST be an explicit operation, never a side effect of a
 push: it changes what the vault asserts about itself. It is idempotent
