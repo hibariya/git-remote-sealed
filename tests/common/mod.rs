@@ -377,9 +377,14 @@ pub fn add_bundle(
 
 /// Serialize (validated by re-parse) and encrypt the manifest as `sealed-manifest.age`.
 pub fn add_manifest(files: &mut Vec<(String, Vec<u8>)>, recipient: &Recipient, m: &Manifest) {
+    add_manifest_to(files, std::slice::from_ref(recipient), m);
+}
+
+/// As `add_manifest`, encrypted to several recipients — which need not be
+/// the set the manifest declares (that is what §5's check is for).
+pub fn add_manifest_to(files: &mut Vec<(String, Vec<u8>)>, recipients: &[Recipient], m: &Manifest) {
     let text = m.to_text().expect("serializable manifest");
-    let cipher =
-        crypt::encrypt(std::slice::from_ref(recipient), text.as_bytes()).expect("encrypt manifest");
+    let cipher = crypt::encrypt(recipients, text.as_bytes()).expect("encrypt manifest");
     files.push(("sealed-manifest.age".into(), cipher));
 }
 

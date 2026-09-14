@@ -69,51 +69,68 @@ pub fn encrypt_stream<R: Read, W: Write>(
     Ok((n, output))
 }
 
-/// Decrypt with any of the given identities.
-/// §5/M4: how many recipient stanzas an age file's header carries — i.e.
-/// how many keys can open it. The header is plaintext by design (that is
-/// what lets a recipient find its own stanza), so this needs no identity.
+/// What an age header's recipient stanzas say about who can open the
+/// file. The header is plaintext by design (that is what lets a recipient
+/// find its own stanza), so this needs no identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderStanzas {
+    /// `-> X25519 ...` stanzas: one per X25519 recipient the file was
+    /// encrypted to.
+    pub x25519: usize,
+    /// Stanzas of any other type — a passphrase (`scrypt`) or a plugin
+    /// recipient. Grease is NOT counted here (see `header_stanzas`).
+    pub other: usize,
+}
+
+/// §5 declared-vs-actual: count the recipient stanzas in an age file's
+/// header, by type.
 ///
-/// Counts `X25519` stanzas only. The reason is not obvious from the spec:
-/// age writes a random **grease** stanza (`-> <+=V!r-grease ...`) into some
-/// headers on purpose, so that parsers cannot assume they know every stanza
-/// type. Counting every `-> ` line therefore over-counts, at random, and a
-/// guard built on it refuses legitimate writes.
+/// Counting every `-> ` line would be wrong, and the reason is not obvious
+/// from the spec: age writes a random **grease** stanza into some headers
+/// on purpose, so that parsers cannot assume they know every stanza type.
+/// A grease stanza is not a recipient, so it is skipped. Documented
+/// choice: grease is recognized by the `-grease` tag suffix the age
+/// crate (rage) emits; a plugin stanza is `-> <plugin-name> ...`, shape-
+/// identical otherwise, so no stronger rule exists. Every file this
+/// implementation reads was written by the age crate or by an
+/// implementation of this format, and neither produces a non-grease
+/// stanza with that suffix.
 ///
-/// **Known limitation.** §5 does NOT make this format X25519-only — it says
-/// X25519 is the baseline and implementations MAY support other recipient
-/// types (passphrase, plugins). This count is therefore a LOWER bound in
-/// general, and the §5/M4 shrink guard built on it only covers X25519
-/// recipients. That is sound today because both implementations emit
-/// nothing else, and it stays sound only while that holds: the first
-/// non-X25519 recipient (a post-quantum plugin, say) is silently
-/// uncounted, and the guard stops protecting it. An allow-list cannot be
-/// grown to fix this — a plugin stanza is `-> <plugin-name> ...`, shape-
-/// identical to grease. The fix, when this format gains a non-X25519
-/// recipient, is to record the count in the manifest as a `recipients <n>`
-/// line and compare against that: exact, type-agnostic, no header parsing.
-/// Deferred deliberately (2026-09-04 review, L2).
-///
-/// `None` when the bytes are not an age file we recognize; callers treat
-/// that as "cannot tell" and do not block on it.
-pub fn recipient_count(ciphertext: &[u8]) -> Option<usize> {
+/// `None` when the bytes are not an age file we recognize (or the header
+/// is truncated); callers treat that as "cannot tell".
+pub fn header_stanzas(ciphertext: &[u8]) -> Option<HeaderStanzas> {
     let mut lines = ciphertext.split(|b| *b == b'\n');
     let first = lines.next()?;
     if !first.starts_with(b"age-encryption.org/") {
         return None;
     }
-    let mut n = 0usize;
+    let mut counts = HeaderStanzas {
+        x25519: 0,
+        other: 0,
+    };
     for line in lines {
         if line.starts_with(b"---") {
-            return Some(n);
+            return Some(counts);
         }
-        if line.starts_with(b"-> X25519 ") {
-            n += 1;
+        let Some(stanza) = line.strip_prefix(b"-> ") else {
+            continue; // a stanza body line
+        };
+        let tag = stanza.split(|b| *b == b' ').next().unwrap_or_default();
+        if tag == b"X25519" {
+            counts.x25519 += 1;
+        } else if !tag.ends_with(b"-grease") {
+            counts.other += 1;
         }
     }
     None // no MAC line: truncated header, not something to reason about
 }
 
+/// The X25519 stanza count alone (`header_stanzas`), for the §5 check.
+pub fn recipient_count(ciphertext: &[u8]) -> Option<usize> {
+    header_stanzas(ciphertext).map(|h| h.x25519)
+}
+
+/// Decrypt with any of the given identities.
 pub fn decrypt(identities: &[Identity], ciphertext: &[u8]) -> Result<Vec<u8>, CryptError> {
     let mut plaintext = Vec::new();
     decrypt_stream(identities, ciphertext, &mut plaintext)?;
@@ -153,9 +170,30 @@ mod tests {
         assert_eq!(recipient_count(b"not an age file"), None);
 
         // The grease stanza age sprinkles into headers must not be counted:
-        // it is random, so counting it makes the §5 guard refuse at random.
+        // it is random, so counting it makes the §5 check fail at random.
         let greased: &[u8] = b"age-encryption.org/v1\n-> X25519 aaaa\nbbbb\n-> <+=V!r-grease *pYpm6zm pr\n\n--- mac\n";
         assert_eq!(recipient_count(greased), Some(1));
+        assert_eq!(
+            header_stanzas(greased),
+            Some(HeaderStanzas {
+                x25519: 1,
+                other: 0
+            })
+        );
+        // A non-X25519 recipient (passphrase, plugin) is counted apart: the
+        // §5/§9.2 counts are not comparable then.
+        let mixed: &[u8] = b"age-encryption.org/v1\n-> X25519 aaaa\nbbbb\n-> scrypt cccc 18\ndddd\n-> piv-p256 eeee\nffff\n--- mac\n";
+        assert_eq!(
+            header_stanzas(mixed),
+            Some(HeaderStanzas {
+                x25519: 1,
+                other: 2
+            })
+        );
+        assert_eq!(
+            header_stanzas(b"age-encryption.org/v1\n-> X25519 a\n"),
+            None
+        );
     }
 
     #[test]

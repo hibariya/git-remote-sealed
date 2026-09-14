@@ -12,6 +12,7 @@ use std::path::Path;
 
 use age::x25519::Identity;
 
+use crate::crypt::{self, HeaderStanzas};
 use crate::manifest::{self, Manifest, ManifestError, ObjectFormat, TreeMismatch};
 use crate::names::{self, NameClass};
 use crate::pinstore::{self, PinError};
@@ -82,6 +83,14 @@ pub enum ReadError {
         refname: String,
         sha: String,
     },
+    /// §5 declared vs. actual: every `recipient` line is X25519, and the
+    /// manifest ciphertext's X25519 stanza count differs from the number of
+    /// lines. The host cannot forge the manifest, so this is a writer bug,
+    /// never an attack.
+    RecipientCountMismatch {
+        declared: usize,
+        stanzas: usize,
+    },
     Io(String),
 }
 
@@ -125,6 +134,17 @@ impl fmt::Display for ReadError {
                 f,
                 "object {sha} for {refname} is still missing after applying every bundle: corrupt or incomplete vault"
             ),
+            ReadError::RecipientCountMismatch { declared, stanzas } => write!(
+                f,
+                "the manifest declares {declared} recipient(s) but its ciphertext is encrypted to {stanzas} X25519 key(s): \
+                 {}. This is not an attack — the host cannot forge the manifest — but a buggy or misconfigured writer; \
+                 fix that device, then repair the set with `git-remote-sealed enroll`/`revoke` from a device that can read the vault",
+                if stanzas < declared {
+                    "a declared recipient cannot read it"
+                } else {
+                    "an undeclared key can read it"
+                }
+            ),
             ReadError::Io(e) => write!(f, "reader I/O error: {e}"),
         }
     }
@@ -167,6 +187,9 @@ pub struct Prepared {
     /// SHA-256 of the `sealed-manifest.age` ciphertext as fetched (the pin's twin
     /// witness, §7.4).
     manifest_cipher_digest: String,
+    /// The manifest ciphertext's recipient stanzas by type (§5), for the
+    /// writer's pre-recipient diagnostics and the §9.2 upgrade check.
+    manifest_stanzas: Option<HeaderStanzas>,
     writer_must_be_read_only: bool,
     prev_pin: Option<pinstore::Pin>,
     next_pin: pinstore::Pin,
@@ -185,6 +208,12 @@ impl Prepared {
 
     pub fn manifest_cipher_digest(&self) -> &str {
         &self.manifest_cipher_digest
+    }
+
+    /// The manifest ciphertext's recipient stanzas by type (§5); `None`
+    /// when the header could not be read (never on a decrypted manifest).
+    pub fn manifest_stanzas(&self) -> Option<HeaderStanzas> {
+        self.manifest_stanzas
     }
 
     /// §7.3: the manifest carried a line type this implementation does not
@@ -290,9 +319,12 @@ pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection,
     // §6.3: decrypt and validate the manifest (§7)...
     let manifest_cipher = vault.read_blob(manifest_oid)?;
     let manifest_cipher_digest = sha256_hex(&manifest_cipher);
-    let manifest_plain = crate::crypt::decrypt(identities, &manifest_cipher)?;
+    let manifest_plain = crypt::decrypt(identities, &manifest_cipher)?;
     let parsed = manifest::parse(&manifest_plain)?;
     let manifest = parsed.manifest;
+    // §5 declared vs. actual, right after the manifest is validated.
+    let manifest_stanzas = crypt::header_stanzas(&manifest_cipher);
+    check_declared_recipients(&manifest, manifest_stanzas)?;
     // §3: "readers MUST fail if the two disagree" — implied here: the hint
     // passed check_hint (== FORMAT_VERSION) and manifest::parse accepts
     // `format 2` only, so hint == manifest format on every success path.
@@ -330,6 +362,7 @@ pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection,
         tree,
         manifest,
         manifest_cipher_digest,
+        manifest_stanzas,
         writer_must_be_read_only: parsed.writer_must_be_read_only,
         prev_pin,
         next_pin,
@@ -442,6 +475,42 @@ fn empty_outcome() -> ReadOutcome {
     }
 }
 
+/// §5 declared vs. actual: when every `recipient` line is an X25519
+/// recipient, the X25519 stanza count of the manifest ciphertext MUST equal
+/// the number of lines. A pre-recipient manifest declares nothing, and a
+/// set with a non-X25519 member makes the counts incomparable — the check
+/// does not apply to either.
+pub fn check_declared_recipients(
+    m: &Manifest,
+    stanzas: Option<HeaderStanzas>,
+) -> Result<(), ReadError> {
+    if m.is_pre_recipient() || !all_x25519(&m.recipients) {
+        return Ok(());
+    }
+    let Some(stanzas) = stanzas else {
+        return Ok(()); // unreadable header: nothing to compare (the file decrypted)
+    };
+    if stanzas.x25519 != m.recipients.len() {
+        return Err(ReadError::RecipientCountMismatch {
+            declared: m.recipients.len(),
+            stanzas: stanzas.x25519,
+        });
+    }
+    Ok(())
+}
+
+/// Whether every recipient string is an X25519 recipient (the only type
+/// this implementation can tell apart, and encrypt to).
+pub fn all_x25519<'a, I>(recipients: I) -> bool
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    use std::str::FromStr;
+    recipients
+        .into_iter()
+        .all(|r| age::x25519::Recipient::from_str(r).is_ok())
+}
+
 /// §6.2/§3: `sealed-format` must exist, spell a canonical ASCII decimal
 /// version plus a single LF, and be a version we support.
 fn check_hint(vault: &VaultRepo, tree: &VaultTree) -> Result<(), ReadError> {
@@ -528,7 +597,7 @@ fn apply_one(
             .map_err(|e| ReadError::Io(format!("{}: {e}", cipher_path.display())))?;
         let mut plain = fs::File::create(&plain_path)
             .map_err(|e| ReadError::Io(format!("{}: {e}", plain_path.display())))?;
-        crate::crypt::decrypt_stream(identities, std::io::BufReader::new(cipher), &mut plain)?;
+        crypt::decrypt_stream(identities, std::io::BufReader::new(cipher), &mut plain)?;
         plain
             .flush()
             .map_err(|e| ReadError::Io(format!("{}: {e}", plain_path.display())))?;
@@ -578,6 +647,46 @@ fn first_missing_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_vs_actual_applies_only_to_all_x25519_sets() {
+        // §5: fewer stanzas than lines, or more, is INVALID; a pre-recipient
+        // manifest and a set with a non-X25519 member are outside the check.
+        use age::x25519::Identity;
+        let ids: Vec<Identity> = (0..3).map(|_| Identity::generate()).collect();
+        let text = format!(
+            "format 2\nobjectformat sha1\nvault {}\ncounter 1\nseqfloor 1\nrecipient {}\nrecipient {}\n",
+            "ab".repeat(16),
+            ids[0].to_public(),
+            ids[1].to_public()
+        );
+        let m = manifest::parse(text.as_bytes()).expect("parses").manifest;
+        let stanzas = |n: usize| {
+            let rcpts: Vec<_> = ids[..n].iter().map(Identity::to_public).collect();
+            crypt::header_stanzas(&crypt::encrypt(&rcpts, text.as_bytes()).expect("encrypt"))
+        };
+        check_declared_recipients(&m, stanzas(2)).expect("2 declared, 2 stanzas");
+        assert!(matches!(
+            check_declared_recipients(&m, stanzas(3)),
+            Err(ReadError::RecipientCountMismatch {
+                declared: 2,
+                stanzas: 3
+            })
+        ));
+        assert!(matches!(
+            check_declared_recipients(&m, stanzas(1)),
+            Err(ReadError::RecipientCountMismatch {
+                declared: 2,
+                stanzas: 1
+            })
+        ));
+        let mut pre = m.clone();
+        pre.recipients.clear();
+        check_declared_recipients(&pre, stanzas(3)).expect("pre-recipient: no check");
+        let mut plugin = m.clone();
+        plugin.recipients.insert("age1yubikey1qwerty".into());
+        check_declared_recipients(&plugin, stanzas(1)).expect("non-X25519 member: no check");
+    }
 
     #[test]
     fn hint_grammar_is_decimal_plus_single_lf() {
