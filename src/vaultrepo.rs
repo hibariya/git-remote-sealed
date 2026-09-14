@@ -35,6 +35,23 @@ const HYGIENE_ENV: &[(&str, &str)] = &[
 /// renames on the remote never leave stale local branches to misread.
 const MIRROR_REF: &str = "refs/sealed/fetched";
 
+/// Storage settings for every command against the MIRROR (never the
+/// caller's repository or the bundling scratch repository). Everything the
+/// mirror stores is an age ciphertext or a few bytes of metadata: git's
+/// zlib and delta search find nothing there and only burn CPU — measured
+/// at ~2.4 s of a 5.3 s push of 40 MB, in `hash-object -w` (loose zlib)
+/// and again in `pack-objects` for the push (inflate, delta window,
+/// deflate at level 6). The plaintext bundle keeps git's normal
+/// compression, so the vault's size is unchanged.
+const MIRROR_STORAGE_FLAGS: &[&str] = &[
+    "-c",
+    "core.looseCompression=0",
+    "-c",
+    "pack.compression=0",
+    "-c",
+    "pack.window=0",
+];
+
 #[derive(Debug)]
 pub enum GitError {
     /// git itself could not be started.
@@ -543,7 +560,9 @@ impl VaultRepo {
     }
 
     fn git_command(&self, args: &[&str]) -> Command {
-        git_command_in(&self.mirror, args)
+        let mut full: Vec<&str> = MIRROR_STORAGE_FLAGS.to_vec();
+        full.extend_from_slice(args);
+        git_command_in(&self.mirror, &full)
     }
 }
 
