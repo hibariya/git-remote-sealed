@@ -331,21 +331,43 @@ impl VaultRepo {
         let branch = select_branch(remote.head_target.as_deref(), &remote.branches)?;
         self.ensure_mirror(remote.oid_width)?;
 
-        // §6.1: reset the mirror to the remote state, never merge — the
-        // forced refspec makes the fetch a reset (compaction force-updates
-        // the branch, §9, and readers MUST tolerate that).
-        let refspec = format!("+{branch}:{MIRROR_REF}");
-        self.git(
-            &[
+        // §6.1: reset the mirror to the remote state, never merge. When the
+        // advertised tip is a commit the mirror already holds — fetched
+        // earlier, or written here by our own push — it IS the remote
+        // state (object ids are content addresses), so pointing the ref at
+        // it locally is the same reset without a second connection. That
+        // second round trip is most of a no-change fetch against a real
+        // host. Any other tip is fetched; the forced refspec makes that a
+        // reset too (compaction force-updates the branch, §9, and readers
+        // MUST tolerate that).
+        let tip = remote
+            .tips
+            .get(&branch)
+            .cloned()
+            .ok_or_else(|| GitError::BadOutput {
+                what: "ls-remote".into(),
+                detail: format!("no object id listed for {branch}"),
+            })?;
+        let peeled = format!("{tip}^{{commit}}");
+        if object_exists(&self.mirror, &peeled)? {
+            self.git(
+                &["update-ref", "--no-deref", MIRROR_REF, &tip],
+                "update-ref",
+            )?;
+        } else {
+            let refspec = format!("+{branch}:{MIRROR_REF}");
+            self.git(
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    &self.url,
+                    &refspec,
+                ],
                 "fetch",
-                "--quiet",
-                "--no-tags",
-                "--no-recurse-submodules",
-                &self.url,
-                &refspec,
-            ],
-            "fetch",
-        )?;
+            )?;
+        }
 
         let commit = self
             .git(&["rev-parse", "--verify", MIRROR_REF], "rev-parse")?
@@ -675,6 +697,8 @@ pub(crate) struct RemoteListing {
     pub(crate) branches: BTreeSet<String>,
     /// Any ref at all (branches, tags, HEAD, ...).
     pub(crate) any_ref: bool,
+    /// Full branch refname -> the commit id the remote advertises for it.
+    pub(crate) tips: BTreeMap<String, String>,
     /// Width of the object ids advertised (40 = sha1, 64 = sha256).
     pub(crate) oid_width: usize,
 }
@@ -701,6 +725,7 @@ pub(crate) fn parse_ls_remote(listing: &str) -> RemoteListing {
         out.oid_width = left.len();
         if name.starts_with("refs/heads/") {
             out.branches.insert(name.to_owned());
+            out.tips.insert(name.to_owned(), left.to_owned());
         }
     }
     out
@@ -883,6 +908,10 @@ mod tests {
         assert_eq!(remote.head_target.as_deref(), Some("refs/heads/trunk"));
         assert_eq!(remote.branches.len(), 2);
         assert_eq!(remote.oid_width, 4);
+        // Tips are recorded for branches only, under their full names.
+        assert_eq!(remote.tips.len(), 2);
+        assert_eq!(remote.tips["refs/heads/trunk"], "aaaa");
+        assert_eq!(remote.tips["refs/heads/main"], "bbbb");
 
         assert!(parse_ls_remote("").is_empty());
     }
