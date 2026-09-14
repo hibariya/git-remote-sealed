@@ -74,6 +74,7 @@ fn sha1_vault_round_trip() {
         vault_id,
         counter: 1,
         seqfloor: 1,
+        recipients: Default::default(),
         bundles: [(
             1,
             BundleRecord {

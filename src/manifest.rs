@@ -77,6 +77,11 @@ pub struct Manifest {
     pub vault_id: String,
     pub counter: u64,
     pub seqfloor: u64,
+    /// §7.2 `recipient` lines — the vault's recipient set (§5), values as
+    /// age spells them. A `BTreeSet<String>` orders bytewise, which is the
+    /// serialization order §7.2 requires. Empty = a pre-recipient manifest
+    /// (§5): a state, not an error.
+    pub recipients: BTreeSet<String>,
     /// Keyed by seq: §7.2 forbids two bundle lines sharing a sequence number.
     pub bundles: BTreeMap<u64, BundleRecord>,
     /// §7.2 `@<refname> HEAD` — zero or one.
@@ -111,6 +116,8 @@ pub enum ManifestError {
     /// §7.2: no two `bundle` lines may share a sequence number, with or
     /// without `-full`.
     DuplicateBundleSeq(u64),
+    /// §7.2/§7.3: duplicate `recipient` values are INVALID.
+    DuplicateRecipient(String),
     /// §3: refuse versions we do not support.
     UnsupportedFormat(String),
     /// §7.3: a recognized first token whose line does not match its grammar
@@ -145,6 +152,9 @@ impl fmt::Display for ManifestError {
             }
             ManifestError::DuplicateBundleSeq(seq) => {
                 write!(f, "manifest has two bundle lines for sequence {seq}")
+            }
+            ManifestError::DuplicateRecipient(r) => {
+                write!(f, "manifest lists recipient {r} twice")
             }
             ManifestError::UnsupportedFormat(v) => {
                 write!(f, "unsupported vault format '{v}'")
@@ -202,6 +212,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
     let mut vault_id: Option<String> = None;
     let mut counter: Option<u64> = None;
     let mut seqfloor: Option<u64> = None;
+    let mut recipients: BTreeSet<String> = BTreeSet::new();
     let mut pass2: Vec<(usize, Pass2Line)> = Vec::new();
     let mut unknown_seen = false;
 
@@ -287,6 +298,20 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
                         what: "seqfloor",
                     })?;
                 seqfloor = Some(v);
+            }
+            "recipient" => {
+                // §7.2: `recipient <age-recipient>` — a token of bytes
+                // 0x21–0x7E beginning with `age1`; compared by string
+                // equality; duplicates INVALID (§7.3 at-most-once rule).
+                if toks.len() != 2 || !is_age_recipient_token(toks[1]) {
+                    return Err(ManifestError::BadLine {
+                        line_no,
+                        what: "recipient",
+                    });
+                }
+                if !recipients.insert(toks[1].to_owned()) {
+                    return Err(ManifestError::DuplicateRecipient(toks[1].to_owned()));
+                }
             }
             "bundle" => pass2.push((line_no, Pass2Line::Bundle(toks))),
             _ if first.starts_with('@') => pass2.push((line_no, Pass2Line::Head(toks))),
@@ -421,6 +446,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedManifest, ManifestError> {
             vault_id,
             counter,
             seqfloor,
+            recipients,
             bundles,
             head,
             refs,
@@ -440,6 +466,11 @@ impl Manifest {
         out.push_str(&format!("vault {}\n", self.vault_id));
         out.push_str(&format!("counter {}\n", self.counter));
         out.push_str(&format!("seqfloor {}\n", self.seqfloor));
+        // §7.2: sorted bytewise ascending (the BTreeSet's order), so two
+        // implementations serialize one set identically.
+        for r in &self.recipients {
+            out.push_str(&format!("recipient {r}\n"));
+        }
         for record in self.bundles.values() {
             let name = record.logical_name().map_err(|_| ManifestError::BadLine {
                 line_no: 0,
@@ -468,6 +499,13 @@ impl Manifest {
             });
         }
         Ok(out)
+    }
+
+    /// §5: no `recipient` line at all — written before the line type
+    /// existed. Readers handle it as any other manifest; writers may not
+    /// push to it (only the upgrade of §9.2).
+    pub fn is_pre_recipient(&self) -> bool {
+        self.recipients.is_empty()
     }
 
     /// §6.7: the expected file set, total and exact.
@@ -580,6 +618,14 @@ pub(crate) fn is_vault_id(s: &str) -> bool {
     s.len() >= 32 && s.len().is_multiple_of(2) && is_lower_hex(s)
 }
 
+/// §7.2's `recipient` value grammar: a token of bytes 0x21–0x7E beginning
+/// with `age1`. The grammar admits uppercase bytes (a plugin could spell
+/// its recipients that way); writers MUST emit what age emits, which for
+/// X25519 is lowercase bech32, and the reader compares strings as they are.
+pub fn is_age_recipient_token(s: &str) -> bool {
+    s.starts_with("age1") && s.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
 fn is_lower_hex(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
@@ -603,6 +649,9 @@ mod tests {
     const D64_B: &str = "11d411d411d411d411d411d411d411d411d411d411d411d411d411d411d411d4";
     const VAULT: &str = "3f9a6c0e6d1b4b0d9a4f2e7c8b5a1d02";
     const SHA256_REF: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    // The §7.1 example's recipients: RCPT_A sorts before RCPT_B bytewise.
+    const RCPT_A: &str = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p";
+    const RCPT_B: &str = "age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj";
 
     fn base_text() -> String {
         format!(
@@ -687,6 +736,66 @@ mod tests {
         let p = parse_ok(&text);
         assert!(p.writer_must_be_read_only);
         assert_eq!(p.manifest, parse_ok(&base_text()).manifest);
+    }
+
+    #[test]
+    fn recipient_lines_parse_and_serialize_sorted_bytewise() {
+        // §7.2: zero or more `recipient` lines, values as age spells them,
+        // emitted sorted bytewise ascending. Written here out of order and
+        // away from the §7.1 example's position: order is not significant
+        // on read, and the serializer puts them after `seqfloor`.
+        let text = format!(
+            "recipient {RCPT_B}\n\
+             {}\
+             recipient {RCPT_A}\n",
+            base_text()
+        );
+        let p = parse_ok(&text);
+        assert_eq!(
+            p.manifest.recipients.iter().collect::<Vec<_>>(),
+            vec![RCPT_A, RCPT_B]
+        );
+        assert!(!p.manifest.is_pre_recipient());
+        assert!(!p.writer_must_be_read_only, "a recognized line type");
+        let out = p.manifest.to_text().expect("serializable");
+        let expected = base_text().replace(
+            "seqfloor 8\n",
+            &format!("seqfloor 8\nrecipient {RCPT_A}\nrecipient {RCPT_B}\n"),
+        );
+        assert_eq!(out, expected);
+        assert_eq!(parse_ok(&out).manifest, p.manifest);
+    }
+
+    #[test]
+    fn no_recipient_line_is_a_pre_recipient_manifest_not_an_error() {
+        // §5: a state, not an error; readers handle it as any manifest.
+        let p = parse_ok(&base_text());
+        assert!(p.manifest.is_pre_recipient());
+        assert!(p.manifest.recipients.is_empty());
+    }
+
+    #[test]
+    fn duplicate_recipient_line_is_invalid() {
+        // §7.2/§7.3: "Duplicate values are INVALID" — even a whole-set
+        // repeat, and regardless of where the copies sit.
+        let text =
+            base_text() + &format!("recipient {RCPT_A}\nrecipient {RCPT_B}\nrecipient {RCPT_A}\n");
+        assert_eq!(
+            parse_err(&text),
+            ManifestError::DuplicateRecipient(RCPT_A.into())
+        );
+    }
+
+    #[test]
+    fn recipient_token_grammar() {
+        // §7.2: bytes 0x21–0x7E, beginning with `age1`. Plugin recipients
+        // may use uppercase; readers compare as spelled.
+        assert!(is_age_recipient_token(RCPT_A));
+        assert!(is_age_recipient_token("age1yubikey1QWERTY"));
+        assert!(!is_age_recipient_token("AGE1QQQQ"));
+        assert!(!is_age_recipient_token("ssh-ed25519 AAAA"));
+        assert!(!is_age_recipient_token("age1 x"));
+        assert!(!is_age_recipient_token(""));
     }
 
     #[test]
@@ -791,6 +900,11 @@ mod tests {
             ("@refs/heads/x HEAD extra\n".into(), "HEAD symref"),
             (format!("{SHA1_B} refs/x extra\n"), "ref"),
             (format!("{SHA1_B}\n"), "ref"),
+            ("recipient\n".into(), "recipient"),
+            (format!("recipient {RCPT_A} {RCPT_B}\n"), "recipient"),
+            ("recipient ssh-ed25519 AAAA\n".into(), "recipient"),
+            ("recipient age1\u{e9}\n".into(), "recipient"),
+            ("recipient age1 \n".into(), "recipient"),
         ];
         for (line, what) in cases {
             // Replace a conflicting base line where needed.

@@ -919,6 +919,7 @@ mod tests {
             vault_id: VAULT.into(),
             counter,
             seqfloor,
+            recipients: Default::default(),
             bundles: bundles
                 .iter()
                 .map(|(seq, full, digest)| {

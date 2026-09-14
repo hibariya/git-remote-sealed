@@ -493,6 +493,7 @@ impl Ctx<'_> {
                 vault_id: fresh_vault_id(),
                 counter: 1,
                 seqfloor: 1,
+                recipients: BTreeSet::new(),
                 bundles: [(
                     1,
                     BundleRecord {
@@ -665,6 +666,8 @@ impl Ctx<'_> {
             vault_id: m.vault_id.clone(),
             counter,
             seqfloor: m.seqfloor,
+            // §8: the set is carried unchanged into the manifest written.
+            recipients: m.recipients.clone(),
             bundles: m.bundles.clone(),
             head: head.clone(),
             refs,

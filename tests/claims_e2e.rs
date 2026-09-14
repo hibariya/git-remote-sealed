@@ -117,6 +117,7 @@ fn hand_manifest(
         vault_id: vault_id.to_owned(),
         counter,
         seqfloor,
+        recipients: Default::default(),
         bundles: bundles.iter().map(|b| (b.seq, b.clone())).collect(),
         head: head.map(str::to_owned),
         refs: refs

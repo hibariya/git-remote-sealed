@@ -92,6 +92,7 @@ pub fn compact(
             vault_id: m.vault_id.clone(),
             counter,
             seqfloor: m.seqfloor,
+            recipients: m.recipients.clone(),
             bundles: Default::default(),
             // Documented choice: a manifest-only generation carries no HEAD
             // line (there is no ref for it to name).

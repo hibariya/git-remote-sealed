@@ -103,6 +103,7 @@ impl Fixture {
             vault_id: self.vault_id.clone(),
             counter,
             seqfloor,
+            recipients: Default::default(),
             bundles: bundles.iter().map(|r| (r.seq, (*r).clone())).collect(),
             head: Some("refs/heads/main".into()),
             refs: refs
