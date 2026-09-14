@@ -804,19 +804,12 @@ fn chunked_push_round_trips() {
 }
 
 #[test]
-fn extra_recipient_can_clone() {
-    // (k) §5: files are encrypted to the recipient set = own + extras.
+fn init_declares_this_devices_own_recipient_only() {
+    // (k) §5/§8: a vault-initializing write declares the set it encrypts
+    // to — this device's own recipient, nothing else (a recovery key is
+    // `enroll`ed afterwards, §9.1) — and every file is encrypted to exactly
+    // that set: a stranger cannot decrypt.
     let lab = Lab::new("w-recipients");
-    let second = Identity::generate();
-    let second_file = lab.scratch.join("second.txt");
-    fs::write(
-        &second_file,
-        format!(
-            "{}\n",
-            age::secrecy::ExposeSecret::expose_secret(&second.to_string())
-        ),
-    )
-    .expect("write");
     let stranger = Identity::generate();
     let stranger_file = lab.scratch.join("stranger.txt");
     fs::write(
@@ -829,27 +822,23 @@ fn extra_recipient_can_clone() {
     .expect("write");
 
     let src = lab.source("src");
-    git(
-        &src.dir,
-        &[
-            "config",
-            "sealed.recipients",
-            &second.to_public().to_string(),
-        ],
-    );
-    let c1 = src.commit_file("note.md", "shared\n", "first");
+    let c1 = src.commit_file("note.md", "mine\n", "first");
     lab.push_ok(&src.dir, &["main"]);
-
-    let dest = lab.scratch.join("second-clone");
-    let out = sealed_git(
-        &lab.scratch,
-        &["clone", "-q", &lab.remote.sealed_url(), "second-clone"],
-        &second_file,
-        &[],
+    let m = lab.manifest();
+    assert_eq!(
+        m.recipients.iter().collect::<Vec<_>>(),
+        vec![&lab.identity.to_public().to_string()]
     );
-    assert_ok(&out, "clone with the second identity");
-    assert_eq!(rev(&dest, "refs/heads/main"), c1);
+    for name in ["sealed-manifest.age", "1-full.bundle.age"] {
+        assert_eq!(
+            crypt::recipient_count(&lab.remote.file_bytes("main", name)),
+            Some(1),
+            "{name} is encrypted to the one declared key"
+        );
+    }
 
+    let dest = lab.clone_ok("clone");
+    assert_eq!(rev(&dest, "refs/heads/main"), c1);
     let out = sealed_git(
         &lab.scratch,
         &["clone", "-q", &lab.remote.sealed_url(), "stranger-clone"],

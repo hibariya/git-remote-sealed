@@ -26,7 +26,7 @@ use crate::pinstore::{PinError, PinStore};
 use crate::settings::{Settings, SettingsError};
 use crate::srcrepo;
 use crate::vaultrepo::{self, GitError, VaultRepo};
-use crate::writer::{WriteError, WriterConfig};
+use crate::writer::WriteError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -239,16 +239,6 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
         .iter()
         .map(ToString::to_string)
         .collect();
-    let extras: Vec<String> = settings
-        .extra_recipients
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let join: Vec<String> = settings
-        .recipient_set()
-        .iter()
-        .map(ToString::to_string)
-        .collect();
 
     let mut text = String::new();
     text.push_str(&format!("vault:      {label}\n"));
@@ -258,12 +248,6 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
     ));
     for r in &own {
         text.push_str(&format!("recipient:  {r} (this device)\n"));
-    }
-    if extras.is_empty() {
-        text.push_str("extra:      none (git config sealed.recipients)\n");
-    }
-    for r in &extras {
-        text.push_str(&format!("extra:      {r} (sealed.recipients)\n"));
     }
     // §7.4 (M7): what this device remembers about the vault. Appendix A's
     // recovery checks ask a human to compare the vault id, and the rollback
@@ -316,14 +300,6 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
         Ok(None) => text.push_str("vault id:   (not yet seen from this repository)\n"),
         Err(e) => text.push_str(&format!("vault id:   (pin unreadable: {e})\n")),
     }
-    text.push_str(&format!("join:       {}\n", join.join(" ")));
-    text.push_str(
-        "            On a new device, after it has its own identity, run there:\n\
-         \x20             git config sealed.recipients \"<the join line above>\"\n\
-         \x20           then add the new device's recipient to sealed.recipients here\n\
-         \x20           and run `git-remote-sealed compact` here before cloning there.\n\
-         \x20           Compaction encrypts the existing history to the new key too.\n",
-    );
     out.write_all(text.as_bytes())
         .map_err(|e| CliError::Io(e.to_string()))
 }
@@ -382,12 +358,17 @@ fn run_compact(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError
     let settings = Settings::load()?;
     let (label, url) = resolve_remote(&settings.git_dir, remote)?;
     let vault = VaultRepo::open(&settings.git_dir, &url)?;
-    let cfg = WriterConfig {
-        recipients: settings.recipient_set(),
-        chunk_bytes: settings.chunk_bytes,
-        allow_recipient_shrink: settings.allow_recipient_shrink,
+    let cfg = settings.writer_config();
+    let report = match compact::compact(
+        &vault,
+        &settings.git_dir,
+        &settings.identities,
+        &cfg,
+        &compact::SetChange::Keep,
+    )? {
+        compact::Compaction::Done(report) => report,
+        compact::Compaction::NothingToDo { .. } => unreachable!("Keep always compacts"),
     };
-    let report = compact::compact(&vault, &settings.git_dir, &settings.identities, &cfg)?;
     match report.allocated {
         Some(seq) => writeln!(
             out,

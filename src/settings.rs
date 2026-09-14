@@ -1,17 +1,22 @@
 //! Per-repository settings the helper and the subcommands share: which
 //! repository we are driven for, the age identity (§5: decryption needs
-//! one), the recipient set writes encrypt to (§5), and the writer-local
-//! chunk threshold (§4.2).
+//! one), and the writer-local chunk threshold (§4.2). The recipient set is
+//! NOT a setting: §5 has the manifest declare it, and a writer learns whom
+//! to encrypt to from the manifest it validated.
 //!
 //! Sources, in order:
 //! - identity: `SEALED_IDENTITY` (path to an age identity file), else
 //!   `git config sealed.identity`;
-//! - extra recipients: every value of `git config --get-all
-//!   sealed.recipients`, each split on whitespace (space or newline), each
-//!   an `age1…` X25519 recipient;
 //! - chunk threshold: `git config sealed.chunk-mb`, default 4 (§4.2's
 //!   SHOULD for JGit-on-Android recipients; with unbounded chunk counts
-//!   small chunks cost nothing, so the safe value is the default).
+//!   small chunks cost nothing, so the safe value is the default);
+//! - the LEGACY recipient list: every value of `git config --get-all
+//!   sealed.recipients`, each split on whitespace, each an `age1…` X25519
+//!   recipient. Before 0.3.0 this was the per-device half of the recipient
+//!   set. It is read in exactly two places now: `upgrade` (§9.2) records
+//!   it, and writes to a current vault check it against the manifest — a
+//!   key it names that the vault does not have is refused, never silently
+//!   ignored (`writer::writable_set`).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -21,6 +26,7 @@ use age::x25519::{Identity, Recipient};
 
 use crate::srcrepo;
 use crate::vaultrepo::GitError;
+use crate::writer::WriterConfig;
 
 /// Default chunk threshold in MiB (§4.2).
 pub const DEFAULT_CHUNK_MB: u64 = 4;
@@ -86,14 +92,11 @@ pub struct Settings {
     pub git_dir: PathBuf,
     pub identity_path: PathBuf,
     pub identities: Vec<Identity>,
-    /// `sealed.recipients`, validated, in config order (duplicates kept
-    /// out of the recipient set by `recipient_set`).
-    pub extra_recipients: Vec<Recipient>,
+    /// The legacy `sealed.recipients` list, validated, in config order
+    /// (see the module comment for its two remaining uses).
+    pub legacy_recipients: Vec<Recipient>,
     /// Writer-local chunk threshold in bytes (§4.2).
     pub chunk_bytes: u64,
-    /// `sealed.allow-recipient-shrink`: write even when this device has
-    /// fewer recipients than the vault (§5/M4). Off unless set true.
-    pub allow_recipient_shrink: bool,
 }
 
 impl Settings {
@@ -118,7 +121,7 @@ impl Settings {
                 detail,
             })?;
 
-        let mut extra_recipients = Vec::new();
+        let mut legacy_recipients = Vec::new();
         for value in srcrepo::config_get_all(&git_dir, "sealed.recipients")? {
             for token in value.split_whitespace() {
                 let r =
@@ -126,7 +129,7 @@ impl Settings {
                         token: token.to_owned(),
                         detail: detail.to_string(),
                     })?;
-                extra_recipients.push(r);
+                legacy_recipients.push(r);
             }
         }
 
@@ -140,16 +143,12 @@ impl Settings {
                 .ok_or(SettingsError::BadChunkMb(v))?,
         };
 
-        let allow_recipient_shrink = matches!(srcrepo::config_get(&git_dir, "sealed.allow-recipient-shrink")?,
-                Some(v) if matches!(v.trim(), "true" | "1" | "yes" | "on"));
-
         Ok(Settings {
             git_dir,
             identity_path,
             identities,
-            extra_recipients,
+            legacy_recipients,
             chunk_bytes: chunk_mb.saturating_mul(1024 * 1024),
-            allow_recipient_shrink,
         })
     }
 
@@ -158,21 +157,14 @@ impl Settings {
         self.identities.iter().map(Identity::to_public).collect()
     }
 
-    /// §5: the recipient set writes encrypt to — own recipients plus the
-    /// configured extras, deduplicated, own first.
-    pub fn recipient_set(&self) -> Vec<Recipient> {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut set = Vec::new();
-        for r in self
-            .own_recipients()
-            .into_iter()
-            .chain(self.extra_recipients.iter().cloned())
-        {
-            if seen.insert(r.to_string()) {
-                set.push(r);
-            }
+    /// The writer's configuration: this device's own recipients (what a
+    /// vault-initializing write declares, §8) and the legacy list.
+    pub fn writer_config(&self) -> WriterConfig {
+        WriterConfig {
+            own_recipients: self.own_recipients(),
+            legacy_recipients: self.legacy_recipients.clone(),
+            chunk_bytes: self.chunk_bytes,
         }
-        set
     }
 }
 
@@ -260,19 +252,21 @@ mod tests {
     }
 
     #[test]
-    fn recipient_set_is_own_plus_extras_deduplicated() {
+    fn upgrade_set_is_own_plus_legacy_deduplicated() {
+        // §9.2: the set an upgrade records is own identities' recipients
+        // plus the legacy list, each key once.
         let own = Identity::generate();
         let other = Identity::generate();
         let settings = Settings {
             git_dir: PathBuf::from("/nonexistent"),
             identity_path: PathBuf::from("/nonexistent/key.txt"),
             identities: vec![own.clone()],
-            extra_recipients: vec![other.to_public(), own.to_public(), other.to_public()],
+            legacy_recipients: vec![other.to_public(), own.to_public(), other.to_public()],
             chunk_bytes: 1,
-            allow_recipient_shrink: false,
         };
         let set: Vec<String> = settings
-            .recipient_set()
+            .writer_config()
+            .upgrade_set()
             .iter()
             .map(ToString::to_string)
             .collect();

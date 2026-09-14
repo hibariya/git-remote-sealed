@@ -40,7 +40,7 @@ use age::secrecy::ExposeSecret;
 use age::x25519::{Identity, Recipient};
 
 use crate::bundling::{self, BundleError, BundleSpec, Stored};
-use crate::crypt::{self, CryptError};
+use crate::crypt::{self, CryptError, HeaderStanzas};
 use crate::manifest::{BundleRecord, Manifest, ManifestError, ObjectFormat, MAX_COUNTER};
 use crate::names::{self, BundleName, NameClass, NameError, MAX_SEQ};
 use crate::pinstore::{self, Pin, PinError};
@@ -79,11 +79,41 @@ pub enum WriteError {
     /// §7.3: the manifest contained a line type this implementation does not
     /// know; writing would silently delete it.
     ReadOnlyVault,
-    /// §5/M4: this device would encrypt to fewer recipients than the vault
-    /// currently has, locking the others out of everything it writes.
-    RecipientShrink {
-        vault: usize,
-        ours: usize,
+    /// §5/§8: the manifest declares no recipient set; the only write allowed
+    /// against it is the upgrade of §9.2. Carries what that upgrade would
+    /// record from this device, so the user can judge it before running it.
+    PreRecipientVault {
+        would_record: Vec<String>,
+        stanzas: Option<HeaderStanzas>,
+    },
+    /// The legacy `sealed.recipients` names a key the manifest's set does
+    /// not have. Ignoring it would silently drop a recipient the user
+    /// meant to have; obeying it is not this version's job (§9.1).
+    StaleRecipientConfig {
+        key: String,
+    },
+    /// The manifest declares a recipient this implementation cannot
+    /// encrypt to (§5: X25519 is the baseline; other types are optional).
+    UnsupportedRecipient(String),
+    /// §8/§9.1: the recipient set of a written generation must be non-empty.
+    EmptyRecipientSet,
+    /// §9.1: removing this device's own recipient needs explicit
+    /// confirmation — the device loses read access to the result.
+    RevokeOwnKeyNeedsYes {
+        key: String,
+    },
+    /// §9.2: the set this device would record is not the size of the
+    /// manifest ciphertext's X25519 recipient set. Both directions are
+    /// refused; a larger set is the stale-configuration case.
+    UpgradeCountMismatch {
+        would_record: Vec<String>,
+        stanzas: usize,
+    },
+    /// §9.2: the manifest ciphertext has non-X25519 stanzas, so the set
+    /// size cannot be checked; the user must confirm the set explicitly.
+    UpgradeCountUnknown {
+        would_record: Vec<String>,
+        stanzas: HeaderStanzas,
     },
     /// §8 preamble.
     ShallowRepository,
@@ -145,9 +175,75 @@ impl fmt::Display for WriteError {
                 f,
                 "the vault manifest has lines this version does not understand; refusing to write (read-only) — update git-remote-sealed"
             ),
-            WriteError::RecipientShrink { vault, ours } => write!(
+            WriteError::PreRecipientVault {
+                would_record,
+                stanzas,
+            } => {
+                let ciphertext = match stanzas {
+                    Some(h) if h.other == 0 => format!("{} X25519 key(s)", h.x25519),
+                    Some(h) => format!(
+                        "{} X25519 key(s) and {} other recipient stanza(s)",
+                        h.x25519, h.other
+                    ),
+                    None => "an unknown number of keys".to_owned(),
+                };
+                write!(
+                    f,
+                    "this vault was written before recipients were recorded in the manifest, so a push cannot know whom to encrypt to; it accepts no pushes until it is upgraded once.\n\
+                     Run `git-remote-sealed upgrade` here. It would record {} recipient(s):\n{}\n\
+                     (this device's identity plus `sealed.recipients`); the manifest ciphertext is encrypted to {ciphertext}, and the two counts must agree",
+                    would_record.len(),
+                    bullet_list(would_record)
+                )
+            }
+            WriteError::StaleRecipientConfig { key } => write!(
                 f,
-                "refusing to write: this vault is encrypted to {vault} recipients but this device would encrypt to {ours}. Everything written from here would be unreadable to the others — check `sealed.recipients` (`git-remote-sealed info`). If you really are removing a device, set `git config sealed.allow-recipient-shrink true`"
+                "`sealed.recipients` names {key}, which is not a recipient of this vault. \
+                 sealed.recipients is ignored since 0.3.0 — the vault's manifest declares the set — so this would silently drop that key: \
+                 run `git-remote-sealed enroll {key}` to add it (after the first push, for a new vault), or remove it from config (`git config --show-origin --get-all sealed.recipients`)"
+            ),
+            WriteError::UnsupportedRecipient(r) => write!(
+                f,
+                "the vault's recipient set includes {r}, which is not an X25519 recipient; this implementation cannot encrypt to it"
+            ),
+            WriteError::EmptyRecipientSet => write!(
+                f,
+                "refusing to write a generation with no recipient: the set must keep at least one key"
+            ),
+            WriteError::RevokeOwnKeyNeedsYes { key } => write!(
+                f,
+                "{key} is this device's own recipient: revoking it means this device can no longer read the vault it just wrote. \
+                 To proceed: git-remote-sealed revoke --yes {key}"
+            ),
+            WriteError::UpgradeCountMismatch {
+                would_record,
+                stanzas,
+            } => {
+                let configured = would_record.len();
+                let advice = if configured < *stanzas {
+                    "A smaller set would lock out a current reader: add the missing key(s) to `sealed.recipients` here (each other device shows its own under `git-remote-sealed info`) and retry"
+                } else {
+                    "A larger set is almost always a stale global entry; check `git config --show-origin --get-all sealed.recipients`, remove the extra key(s), and retry (a key that does belong can be enrolled after the upgrade)"
+                };
+                write!(
+                    f,
+                    "refusing to upgrade: this device would record {configured} recipient(s):\n{}\n\
+                     but the vault's manifest is encrypted to {stanzas} X25519 key(s). {advice}",
+                    bullet_list(would_record)
+                )
+            }
+            WriteError::UpgradeCountUnknown {
+                would_record,
+                stanzas,
+            } => write!(
+                f,
+                "cannot check the recipient set: the vault's manifest is encrypted to {} X25519 key(s) and {} recipient stanza(s) of another type, so the set size cannot be determined from the ciphertext. \
+                 This device would record {} recipient(s):\n{}\n\
+                 If that is exactly the set every device uses, re-run with --yes",
+                stanzas.x25519,
+                stanzas.other,
+                would_record.len(),
+                bullet_list(would_record)
             ),
             WriteError::ShallowRepository => write!(
                 f,
@@ -277,14 +373,102 @@ pub struct PushReport {
     pub written: Option<Written>,
 }
 
-/// Writer-local policy (§4.2 threshold) and the recipient set (§5).
+/// Writer-local policy (§4.2 threshold) and what this device knows about
+/// recipients. The set a write encrypts to comes from the manifest (§5,
+/// §8); these fields only feed vault initialization, the legacy-config
+/// consistency check, and the §9.2 upgrade.
 pub struct WriterConfig {
-    pub recipients: Vec<Recipient>,
+    /// This device's own identities' recipients: what a vault-initializing
+    /// write declares, and what `revoke` protects with `--yes`.
+    pub own_recipients: Vec<Recipient>,
+    /// The legacy `sealed.recipients` list (see `settings`).
+    pub legacy_recipients: Vec<Recipient>,
     pub chunk_bytes: u64,
-    /// §5/M4 opt-in (`git config sealed.allow-recipient-shrink true`): write
-    /// even when this device has fewer recipients than the vault. The
-    /// deliberate case is removing a lost device.
-    pub allow_recipient_shrink: bool,
+}
+
+impl WriterConfig {
+    /// The set this device declares when it initializes a vault (§8: "a
+    /// vault-initializing write declares the set it encrypts to") — its own
+    /// recipients, each once.
+    pub fn init_set(&self) -> Vec<Recipient> {
+        dedup(self.own_recipients.iter().cloned())
+    }
+
+    /// §9.2: the set an upgrade records — own recipients plus the legacy
+    /// list, each once, own first.
+    pub fn upgrade_set(&self) -> Vec<Recipient> {
+        dedup(
+            self.own_recipients
+                .iter()
+                .chain(self.legacy_recipients.iter())
+                .cloned(),
+        )
+    }
+}
+
+fn dedup(recipients: impl Iterator<Item = Recipient>) -> Vec<Recipient> {
+    let mut seen = BTreeSet::new();
+    recipients.filter(|r| seen.insert(r.to_string())).collect()
+}
+
+fn bullet_list(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|i| format!("    {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The manifest's declared set as age recipients, in the manifest's order
+/// (§5: a writer learns whom to encrypt to from the manifest it validated).
+pub(crate) fn recipients_of(m: &Manifest) -> Result<Vec<Recipient>, WriteError> {
+    use std::str::FromStr;
+    m.recipients
+        .iter()
+        .map(|r| Recipient::from_str(r).map_err(|_| WriteError::UnsupportedRecipient(r.clone())))
+        .collect()
+}
+
+/// What a write against an existing vault must establish before it
+/// allocates anything: §7.3 (read-only against unknown lines), §5/§8 (no
+/// push to a pre-recipient vault), and the legacy-config consistency check.
+/// Returns the set to encrypt to — the manifest's.
+pub(crate) fn writable_set(p: &Prepared, cfg: &WriterConfig) -> Result<Vec<Recipient>, WriteError> {
+    if p.writer_must_be_read_only() {
+        return Err(WriteError::ReadOnlyVault);
+    }
+    let m = p.manifest();
+    if m.is_pre_recipient() {
+        return Err(WriteError::PreRecipientVault {
+            would_record: cfg.upgrade_set().iter().map(ToString::to_string).collect(),
+            stanzas: p.manifest_stanzas(),
+        });
+    }
+    check_legacy_config(&m.recipients, cfg)?;
+    recipients_of(m)
+}
+
+/// `sealed.recipients` is not an input any more, but it is not ignored
+/// blindly either: a key it names that the vault does not have is refused
+/// (the user meant to have it; `enroll` is how), and a list the vault
+/// already covers just earns a reminder to remove it.
+pub(crate) fn check_legacy_config(
+    declared: &BTreeSet<String>,
+    cfg: &WriterConfig,
+) -> Result<(), WriteError> {
+    if cfg.legacy_recipients.is_empty() {
+        return Ok(());
+    }
+    for r in &cfg.legacy_recipients {
+        let key = r.to_string();
+        if !declared.contains(&key) {
+            return Err(WriteError::StaleRecipientConfig { key });
+        }
+    }
+    eprintln!(
+        "git-remote-sealed: warning: sealed.recipients is ignored since 0.3.0 (the vault's manifest declares its recipients; use `git-remote-sealed enroll` to add one); remove it from config: git config --show-origin --get-all sealed.recipients"
+    );
+    Ok(())
 }
 
 /// One update after resolving its source: the new object and its type.
@@ -442,6 +626,16 @@ impl Ctx<'_> {
         let of = ObjectFormat::from_str_exact(self.local_format)
             .ok_or_else(|| WriteError::UnsupportedObjectFormat(self.local_format.to_owned()))?;
         let head = pick_head(srcrepo::head_symref(self.source)?.as_deref(), &refs);
+        // §8: a vault-initializing write declares the set it encrypts to —
+        // this device's own recipient(s); a recovery key is enrolled
+        // afterwards (§9.1). At least one is guaranteed by the identity
+        // file, but the rule is the format's, so it is asserted here.
+        let recipients = self.cfg.init_set();
+        if recipients.is_empty() {
+            return Err(WriteError::EmptyRecipientSet);
+        }
+        let declared: BTreeSet<String> = recipients.iter().map(ToString::to_string).collect();
+        check_legacy_config(&declared, self.cfg)?;
 
         let scratch = self.vault.scratch_dir()?;
         let bundle = bundling::create(
@@ -482,7 +676,7 @@ impl Ctx<'_> {
             let stored = bundling::encrypt_and_store(
                 self.vault,
                 &bundle,
-                &self.cfg.recipients,
+                &recipients,
                 name,
                 self.cfg.chunk_bytes,
                 &scratch,
@@ -493,7 +687,7 @@ impl Ctx<'_> {
                 vault_id: fresh_vault_id(),
                 counter: 1,
                 seqfloor: 1,
-                recipients: BTreeSet::new(),
+                recipients: declared.clone(),
                 bundles: [(
                     1,
                     BundleRecord {
@@ -508,14 +702,8 @@ impl Ctx<'_> {
                 head: head.clone(),
                 refs: refs.clone(),
             };
-            let (commit, manifest_digest) = build_commit(
-                self.vault,
-                &manifest,
-                &self.cfg.recipients,
-                &stored,
-                &[],
-                None,
-            )?;
+            let (commit, manifest_digest) =
+                build_commit(self.vault, &manifest, &recipients, &stored, &[], None)?;
             match self.vault.push_commit(&commit, INIT_BRANCH, None) {
                 Ok(PushOutcome::Accepted) => {
                     // No pin existed (a pinned reader refuses an empty vault,
@@ -583,11 +771,9 @@ impl Ctx<'_> {
         resolved: &[Resolved],
         p: &Prepared,
     ) -> Result<Attempt, WriteError> {
-        // §7.3: read-only against a manifest with unknown line types.
-        if p.writer_must_be_read_only() {
-            return Err(WriteError::ReadOnlyVault);
-        }
-        check_recipient_shrink(self.vault, p, self.cfg)?;
+        // §7.3 read-only, §5/§8 pre-recipient refusal, legacy-config check;
+        // the set to encrypt to is the manifest's (§8 "Recipient set").
+        let recipients = writable_set(p, self.cfg)?;
         let m = p.manifest();
         // §8 preamble: object format equality.
         if self.local_format != m.object_format.as_str() {
@@ -725,7 +911,7 @@ impl Ctx<'_> {
             let encrypted = bundling::encrypt_and_store(
                 self.vault,
                 &bundle,
-                &self.cfg.recipients,
+                &recipients,
                 name,
                 self.cfg.chunk_bytes,
                 &scratch,
@@ -749,7 +935,7 @@ impl Ctx<'_> {
         let (commit, manifest_digest) = build_commit(
             self.vault,
             &manifest,
-            &self.cfg.recipients,
+            &recipients,
             &stored,
             &preserved,
             Some(&p.tree().commit),
@@ -800,42 +986,6 @@ impl Ctx<'_> {
             }
         }
     }
-}
-
-/// §5/M4: refuse to write when this device would encrypt to FEWER
-/// recipients than the vault already has.
-///
-/// age takes only recipient strings, so a device whose `sealed.recipients`
-/// is short — a stale config, a half-finished device setup — writes
-/// perfectly valid files that the other devices simply cannot open. Nothing
-/// detects that at write time, and the vault keeps working for the writer,
-/// so it surfaces on someone else's next sync as "age decryption failed".
-/// Kotlin has had this guard; this is the port of it.
-///
-/// Counting stanzas is a lower bound on "who can read this" (one key could
-/// hold several stanzas in principle), which is the safe direction: we only
-/// ever refuse when we are strictly smaller.
-pub(crate) fn check_recipient_shrink(
-    vault: &VaultRepo,
-    p: &Prepared,
-    cfg: &WriterConfig,
-) -> Result<(), WriteError> {
-    if cfg.allow_recipient_shrink {
-        return Ok(());
-    }
-    let Some(oid) = p.tree().files.get(crate::MANIFEST_FILE) else {
-        return Ok(());
-    };
-    let Some(have) = crypt::recipient_count(&vault.read_blob(oid)?) else {
-        return Ok(()); // not an age header we recognize: nothing to compare
-    };
-    if cfg.recipients.len() < have {
-        return Err(WriteError::RecipientShrink {
-            vault: have,
-            ours: cfg.recipients.len(),
-        });
-    }
-    Ok(())
 }
 
 /// §8.2 for every update: non-forced updates need `old` (the manifest

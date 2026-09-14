@@ -102,22 +102,24 @@ fn manifest_lines<'a>(text: &'a str, first_token: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// A hand-built generation-1 manifest (counter 1, seqfloor 1) declaring
+/// `recipients` (§7.2); an empty list makes a pre-recipient manifest (§5),
+/// which reads fine but takes no push.
 fn hand_manifest(
     of: ObjectFormat,
     vault_id: &str,
-    counter: u64,
-    seqfloor: u64,
     bundles: &[BundleRecord],
     refs: &[(&str, &str)],
     head: Option<&str>,
+    recipients: &[String],
 ) -> Manifest {
     Manifest {
         format: 2,
         object_format: of,
         vault_id: vault_id.to_owned(),
-        counter,
-        seqfloor,
-        recipients: Default::default(),
+        counter: 1,
+        seqfloor: 1,
+        recipients: recipients.iter().cloned().collect(),
         bundles: bundles.iter().map(|b| (b.seq, b.clone())).collect(),
         head: head.map(str::to_owned),
         refs: refs
@@ -753,11 +755,10 @@ fn hand_generation(
     let m = hand_manifest(
         ObjectFormat::Sha1,
         vault_id,
-        1,
-        1,
         &[rec],
         &[("refs/heads/main", main_sha)],
         Some("refs/heads/main"),
+        &[identity.to_public().to_string()],
     );
     add_manifest(&mut files, &identity.to_public(), &m);
     remote.commit(&files, branch);
@@ -953,11 +954,10 @@ fn wrong_bundle_header_version_is_refused_both_ways() {
         let m = hand_manifest(
             of,
             &"cd".repeat(16),
-            1,
-            1,
             &[rec],
             &[("refs/heads/main", &sha)],
             Some("refs/heads/main"),
+            &[recipient.to_string()],
         );
         add_manifest(&mut files, &recipient, &m);
         remote.commit(&files, "main");

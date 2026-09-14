@@ -119,11 +119,7 @@ pub struct Session {
 
 impl Session {
     pub fn new(url: String, settings: Settings) -> Session {
-        let writer_config = WriterConfig {
-            recipients: settings.recipient_set(),
-            chunk_bytes: settings.chunk_bytes,
-            allow_recipient_shrink: settings.allow_recipient_shrink,
-        };
+        let writer_config = settings.writer_config();
         Session {
             url,
             git_dir: settings.git_dir,
@@ -144,9 +140,9 @@ impl Session {
             git_dir,
             identities: Vec::new(),
             writer_config: WriterConfig {
-                recipients: Vec::new(),
+                own_recipients: Vec::new(),
+                legacy_recipients: Vec::new(),
                 chunk_bytes: 1,
-                allow_recipient_shrink: false,
             },
             report_object_format: false,
             vault: None,
