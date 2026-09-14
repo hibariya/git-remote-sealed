@@ -252,6 +252,13 @@ requires one pin per vault identity plus a durable URL → vault binding
 
 ## Model abstractions the spec refines
 
+- The model has no recipients: encryption is abstracted to "cannot be
+  created or opened without a key" (FORMAT.md §10). The `recipient`
+  manifest lines (§5, §7.2), the declared-vs-actual count check, and
+  the set-changing and upgrade compactions (§9.1, §9.2) are outside
+  the model. What those compactions inherit — the CAS against the
+  observed tip, `-full` at the lowest sequence, the allocation rules —
+  is the ordinary compaction the model does cover.
 - The model has no read-without-apply: `doRead` accepts AND applies in
   one step, so its `seen` memory records a generation's bindings on
   every read, and `doPush` (which starts from a read) binds the base's

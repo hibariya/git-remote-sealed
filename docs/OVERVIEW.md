@@ -33,6 +33,7 @@ Its main fields are:
 | `vault` | Identifies this vault across different URLs |
 | `counter` | Counts manifest generations |
 | `seqfloor` | Tracks the sequence-number floor used for new bundles |
+| `recipient` lines | Name the keys every file of this generation is encrypted to |
 | `bundle` lines | Name the bundles, their ciphertext digests, and any part counts |
 | Ref lines and HEAD | Describe the source repository's current refs and default branch |
 
@@ -82,9 +83,12 @@ manifest refs. It replaces the vault branch with a parentless commit, but
 only if the branch still has the tip observed at the start. A concurrent
 push makes it retry. Bundle numbering continues after compaction.
 
-Adding a recipient changes encryption for future files. Compact on a
-device that can read the existing history before cloning with the new key.
-Compaction makes that snapshot readable with the new key too.
+Adding or removing a key is itself a compaction. The new snapshot and
+its manifest are encrypted to the new set, so a device added this way
+reads the whole history from its first fetch, and every other device
+learns the new set from the manifest. A vault written before keys were
+recorded in the manifest accepts no new pushes until it is upgraded
+once, by an explicit command, from a device that can read it.
 
 If all refs were deleted, compaction leaves a manifest with no bundles.
 Compaction does not guarantee erasure of copies retained by the host.

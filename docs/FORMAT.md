@@ -242,15 +242,39 @@ Background: [design notes for §4.3](DESIGN-NOTES.md#section-4-3).
 ## 5. Encryption
 
 Every encrypted file is a binary age v1 file (`age-encryption.org/v1`)
-encrypted to the vault's **recipient set** — one or more age recipients.
-X25519 recipients are the baseline; implementations MAY support other
-recipient types (passphrase, plugins). All files SHOULD be encrypted to
-the same recipient set; adding a recipient takes effect for files
-written afterwards (re-encrypting history requires compaction).
+encrypted to the vault's **recipient set**. X25519 recipients are the
+baseline; implementations MAY support other recipient types (passphrase,
+plugins).
+
+**The manifest declares the set.** The recipient set of a vault is the
+set of `recipient` lines in its manifest (§7.2), and every encrypted
+file of a generation MUST be encrypted to exactly that set — the
+manifest itself included. [5b] The set changes only through a
+set-changing compaction (§9.1), so all files of a generation share one
+set and a newly added recipient can read the whole history. There is
+no per-device recipient configuration: a writer learns whom to encrypt
+to from the manifest it validated.
+
+A manifest with no `recipient` line was written before this line type
+existed (a **pre-recipient** vault). Its set is whatever its writers
+were configured with. A writer MUST NOT push to such a vault; the only
+write allowed against it is the upgrade of §9.2. Readers handle it as
+any other manifest.
 
 Decryption requires a corresponding **identity** (secret key). This version
 defines **no write-only algorithm**: §8 requires reading the manifest, and
 that needs an identity. [5a]
+
+**Declared vs. actual.** When every `recipient` line is an X25519
+recipient, the number of X25519 recipient stanzas in the manifest
+ciphertext's age header MUST equal the number of `recipient` lines.
+Readers MUST check this after decrypting the manifest (§6 step 3) and
+treat a mismatch as INVALID: fewer stanzas means a declared recipient
+cannot read, more means an undeclared key can — either way a buggy or
+misconfigured writer. The host cannot forge the manifest, so this
+check reports no attack, only a writer to fix. Readers MAY apply the
+same check to bundles. With non-X25519 recipients present the counts
+are not comparable and the check does not apply.
 
 There is no deterministic-encryption requirement anywhere in this
 format.
@@ -283,8 +307,9 @@ Background: [design notes for §5](DESIGN-NOTES.md#section-5).
    race), recreates the mirror in the other format once.
 2. Check `sealed-format` (§3).
 3. Decrypt and validate the manifest (§7), including the
-   trust-on-first-use checks (§7.4). Bundles present with no manifest
-   is a hard error (§3).
+   trust-on-first-use checks (§7.4) and the declared-vs-actual
+   recipient check (§5). Bundles present with no manifest is a hard
+   error (§3).
 4. Verify the tree against the manifest: the set of grammar-matching
    tree files MUST equal the **expected file set** (§6.7) exactly.
    Extra files (e.g. resurrected pre-compaction ciphertexts) and
@@ -340,6 +365,8 @@ objectformat sha1
 vault 3f9a6c0e6d1b4b0d9a4f2e7c8b5a1d02
 counter 42
 seqfloor 8
+recipient age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+recipient age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj
 bundle 7-full.bundle.age 9f2c...64-hex-sha256...ab 87
 bundle 8.bundle.age 11d4...64-hex-sha256...09
 @refs/heads/main HEAD
@@ -384,6 +411,18 @@ line's terminator (readers accept its absence).
   buggy writer); monotone nondecreasing across generations (§7.4).
   Because `seqfloor` survives an empty bundle list, numbering can
   never restart (see zero-ref compaction, §9).
+- `recipient <age-recipient>` — zero or more, one per member of the
+  recipient set (§5). The value is an age recipient string exactly as
+  age spells it: for X25519, `age1` followed by lowercase bech32 data;
+  plugin recipients as their plugin emits them. Grammar: a token of
+  bytes 0x21–0x7E beginning with `age1`. Readers compare values by
+  string equality, so writers MUST write the lowercase spelling age
+  emits. Duplicate values are INVALID. Writers MUST emit these lines
+  sorted bytewise ascending, so that two implementations serialize one
+  set identically. No `recipient` line at all marks a pre-recipient
+  vault (§5); a writer that emits this line type MUST declare the whole
+  set — a single-recipient vault has exactly one line, a set is never
+  partial.
 - `bundle <logical-name> <sha256-hex> [<count>]` — one line per logical
   bundle in the tree, with the SHA-256 of its (reassembled) ciphertext.
   This list is the authority for which bundle files exist (§6.7).
@@ -426,8 +465,8 @@ rule applies only to
 including a 40- or 64-hex object id — but which does not match its
 grammar (arity included) is **invalid**. Duplicates of at-most-once
 lines (`format`, `objectformat`, `vault`, `counter`, `seqfloor`, the
-HEAD symref, a given refname, a given logical bundle name) are invalid
-too.
+HEAD symref, a given refname, a given logical bundle name, a given
+recipient value) are invalid too.
 
 **Future 2.x extensions add new line types; they never extend existing
 ones.** [7b]
@@ -586,6 +625,15 @@ freshly initialized vault SHOULD be taken from the source repository's
 HEAD;
 implementations that cannot do that MUST pick deterministically and
 document the rule.
+
+**Recipient set.** A writer MUST encrypt every file it produces to
+exactly the recipient set declared by the manifest it validated in
+step 1, and MUST carry that set unchanged into the manifest it writes
+(§5). A vault-initializing write declares the set it encrypts to,
+which MUST contain at least one recipient. A writer that reads a
+pre-recipient manifest MUST NOT proceed past step 1 — the only write
+allowed against such a vault is the upgrade of §9.2 — and SHOULD tell
+the user so. Changing the set is §9.1, never a push.
 
 1. Fetch the vault branch; validate and read the manifest as in
    §6.1–6.4 (an empty vault — no manifest, no bundles — reads as no
@@ -754,6 +802,50 @@ The host may internally retain unreachable objects for a while after
 compaction. That retention is outside this format's control — which is
 precisely why §6.4 forbids applying resurrected files.
 
+### 9.1 Changing the recipient set
+
+Adding or removing a recipient is a compaction (steps 1–4 above) whose
+rewritten manifest carries the new set and whose bundle and manifest
+are encrypted to it. [9b] It MUST NOT be done by a plain push: a push
+encrypts only new files, leaving history unreadable to an added key
+and readable by a removed one, and §5 requires one set per generation.
+The new set MUST be non-empty. Removing the writer's own recipient is
+allowed — the writer can still validate and apply the vault it read —
+but implementations SHOULD require explicit confirmation, since the
+device loses read access to the result.
+
+A zero-ref vault (manifest-only generation, above) changes its set the
+same way, with no bundle: the rewritten manifest is encrypted to the
+new set.
+
+Removal is not erasure: the host may retain earlier generations, each
+readable by the keys of its time (the retention caveat above), and
+whoever held the removed identity keeps whatever they already fetched.
+
+### 9.2 Upgrading a pre-recipient vault
+
+A pre-recipient vault (§5) is upgraded by a compaction whose rewritten
+manifest adds the `recipient` lines; everything else is §9 unchanged
+(a zero-ref vault upgrades to a manifest-only generation). The set
+recorded is the set the upgrading writer is configured with, and it
+MUST satisfy §5's declared-vs-actual rule against the manifest
+ciphertext it read: when that ciphertext's X25519 stanza count can be
+determined, the configured set's size MUST equal it. A smaller set
+would lock out a current reader; a **larger** set is just as invalid —
+it is almost always a stale configuration, and recording it would make
+the mistake the vault's truth. Both MUST be refused, reporting both
+counts. When the count cannot be determined (non-X25519 stanzas), the
+implementation MUST have the user confirm the set explicitly.
+
+The upgrade MUST be an explicit operation, never a side effect of a
+push: it changes what the vault asserts about itself. It is idempotent
+— against a manifest that already carries `recipient` lines it does
+nothing and says so.
+
+Tools written before this line type read an upgraded vault (§7.3 says
+to ignore the lines) and go read-only against it (§7.3's writer rule):
+the intended outcome for a fleet upgraded one device at a time.
+
 Background: [design notes for §9](DESIGN-NOTES.md#section-9).
 
 ## 10. Security considerations
@@ -780,7 +872,9 @@ Background: [design notes for §9](DESIGN-NOTES.md#section-9).
   Knowledge of a recipient is therefore effectively the write
   capability. Recipients are far lower-stakes than identities, but
   they are not public keys to publish: share them only among a vault's
-  own devices.
+  own devices. That is why the recipient set travels inside the
+  encrypted manifest (§5) and MUST NOT be stored in plaintext anywhere
+  in the vault.
   The manifest's bundle list, digests, and chunk counts bind the file
   set; the vault identity binds files to their vault; the counter
   orders manifest generations; the sequence memory binds every
@@ -813,7 +907,10 @@ Background: [design notes for §9](DESIGN-NOTES.md#section-9).
   to at least two recipients, one of them an offline recovery key.
 - **Key distribution is out of scope.** How identities reach devices
   (QR, password manager, hardware token via age plugins) is a client
-  concern.
+  concern. The *recipient* set needs no distribution: it is in the
+  manifest, so any device that can read the vault knows whom to
+  encrypt to. What must travel out of band is a new device's own
+  recipient, to a device that can already read and enrolls it (§9.1).
 
 ## Appendix A. Disaster recovery with stock tools
 
@@ -897,6 +994,7 @@ See [version history](DESIGN-NOTES.md#appendix-b-version-history).
 [4c]: DESIGN-NOTES.md#note-4c
 [4d]: DESIGN-NOTES.md#note-4d
 [5a]: DESIGN-NOTES.md#note-5a
+[5b]: DESIGN-NOTES.md#note-5b
 [6a]: DESIGN-NOTES.md#note-6a
 [7a]: DESIGN-NOTES.md#note-7a
 [7b]: DESIGN-NOTES.md#note-7b
@@ -910,3 +1008,4 @@ See [version history](DESIGN-NOTES.md#appendix-b-version-history).
 [8d]: DESIGN-NOTES.md#note-8d
 [8e]: DESIGN-NOTES.md#note-8e
 [9a]: DESIGN-NOTES.md#note-9a
+[9b]: DESIGN-NOTES.md#note-9b

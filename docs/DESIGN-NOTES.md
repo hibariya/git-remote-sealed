@@ -73,6 +73,23 @@ device holding only recipients could *write* backups without ever being able
 to read the vault. Treat write-only operation as a possible future profile,
 not something to implement from this document.
 
+<a id="note-5b"></a>
+
+**5b.** Until 2026-09-14 the recipient set lived in each device's
+configuration, and nothing checked that the copies agreed. Seen in
+practice: a freshly enrolled device knew only its own key and had its
+first push refused by the shrink guard; adding a third device meant
+editing every other device's list by hand; a stale entry in a global git
+config widened a vault to four recipients while two were configured. age
+headers carry recipient *counts*, not keys, so the set cannot be recovered
+from the ciphertext — it has to be written down somewhere, and the
+manifest is already the encrypted, digest-bound, rollback-protected place
+where the vault describes itself. Recipients are write capabilities (§10),
+which rules out any plaintext file in the tree. The declared-vs-actual
+count check exists so that a writer which encrypts to a different set
+than it declares is caught by the next reader, not by the device that can
+no longer decrypt.
+
 <a id="section-6"></a>
 
 ## Notes for §6
@@ -203,8 +220,30 @@ acknowledged write.
 file reachable in the vault's own git history, so deleted content would never
 leave the host.
 
+<a id="note-9b"></a>
+
+**9b.** Tying every set change to a compaction buys the invariant that one
+generation has one recipient set. That is what makes §5's count check
+exact, and what lets a new device read the whole history from its first
+fetch. The alternative — a push that adds a recipient for future files,
+and a later compaction to make history readable — was the practice before
+2026-09, and the window between the two produced the "identity does not
+open this vault" errors new devices kept hitting. The upgrade of a
+pre-recipient vault is explicit for the same reason the format automates
+nothing else: it changes what the vault asserts about itself, and a
+routine push is the wrong moment to do that silently.
+
 ## Appendix B. Version history
 
+- **Extension** (2026-09-14): the `recipient` manifest line (§7.2)
+  makes the vault declare its own recipient set (§5). Every file of a
+  generation is encrypted to exactly that set; the set changes only by
+  compaction (§9.1); a vault written before the line existed is upgraded
+  by an explicit compaction whose recorded set must match the
+  ciphertext's recipient count (§9.2); readers check declared against
+  actual on the manifest ciphertext. A 2.x line-type extension under
+  §7.3: the format number is unchanged, and earlier tools read upgraded
+  vaults but go read-only against them.
 - **2** (2026-09-02): the first published version. SHA-1 and SHA-256
   source repositories via the `objectformat` line, with strict
   bundle-version mapping; unpadded, value-bounded sequence and chunk
