@@ -294,6 +294,18 @@ fn new_set(
                     stanzas: h,
                 });
             }
+            // No readable header at all. Impossible for a manifest that
+            // just decrypted, but §9.2 says "cannot be determined" means
+            // confirm, not proceed.
+            None if !*yes => {
+                return Err(WriteError::UpgradeCountUnknown {
+                    would_record,
+                    stanzas: crate::crypt::HeaderStanzas {
+                        x25519: 0,
+                        other: 0,
+                    },
+                });
+            }
             _ => {}
         }
         return Ok(Some(set));
