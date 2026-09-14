@@ -861,37 +861,44 @@ fn dangling_remote_head_falls_back_to_main_then_the_first_branch() {
 // ===================== 5. Multi-recipient =====================
 
 #[test]
-fn three_recipients_can_each_clone() {
-    // §5: the recipient set is own + every `sealed.recipients` value.
+fn enrolled_recipients_can_each_clone_and_info_lists_them() {
+    // §5/§9.1: the recipient set is what the manifest declares; `enroll`
+    // is a compaction that adds a key, so a device added this way reads
+    // the whole history from its first fetch — the README's "Adding a
+    // device or a recovery key". `info` shows the set, this device marked.
     let lab = Lab::new("c-three");
     let second = Identity::generate();
     let third = Identity::generate();
     let second_file = identity_file_named(&lab.scratch, "second.txt", &second);
     let third_file = identity_file_named(&lab.scratch, "third.txt", &third);
     let src = lab.source("src");
-    git(
-        &src.dir,
-        &[
-            "config",
-            "--add",
-            "sealed.recipients",
-            &second.to_public().to_string(),
-        ],
-    );
-    git(
-        &src.dir,
-        &[
-            "config",
-            "--add",
-            "sealed.recipients",
-            &third.to_public().to_string(),
-        ],
-    );
     let c1 = src.commit_file("note.md", "shared by three\n", "first");
     lab.push_ok(&src.dir, &["main"]);
+    let text = lab.enroll_ok(&src.dir, &second.to_public());
+    assert!(text.contains("encrypted to 2 recipient(s)"), "{text}");
+    let text = lab.enroll_ok(&src.dir, &third.to_public());
+    assert!(text.contains("encrypted to 3 recipient(s)"), "{text}");
     src.commit_file("note.md", "and again\n", "second");
     lab.push_ok(&src.dir, &["main"]);
     let c2 = rev(&src.dir, "HEAD");
+
+    let mut expected: Vec<String> = [&lab.identity, &second, &third]
+        .iter()
+        .map(|i| i.to_public().to_string())
+        .collect();
+    expected.sort();
+    let m = lab.manifest();
+    assert_eq!(m.recipients.iter().cloned().collect::<Vec<_>>(), expected);
+    // §5: every file of the generation is encrypted to exactly that set.
+    for name in lab.files() {
+        if name != "sealed-format" {
+            assert_eq!(
+                crypt::recipient_count(&lab.remote.file_bytes("main", &name)),
+                Some(3),
+                "{name}"
+            );
+        }
+    }
 
     for (name, file) in [
         ("own", lab.id_file.clone()),
@@ -903,11 +910,25 @@ fn three_recipients_can_each_clone() {
         assert_eq!(rev(&dest, "refs/heads/main"), c2);
         assert_eq!(rev(&dest, "HEAD~1"), c1);
     }
-    let out = cli(&src.dir, &lab.id_file, &["info", "origin"]);
-    assert_ok(&out, "info");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains(&second.to_public().to_string()), "{text}");
-    assert!(text.contains(&third.to_public().to_string()), "{text}");
+    let text = lab.cli_ok(&src.dir, &["info", "origin"]);
+    assert!(
+        text.contains(&format!(
+            "recipients: {} (this device)",
+            lab.identity.to_public()
+        )),
+        "{text}"
+    );
+    for r in [&second, &third] {
+        assert!(
+            text.contains(&format!("recipients: {}\n", r.to_public())),
+            "{text}"
+        );
+    }
+    assert!(
+        text.contains("To add a device: run `git-remote-sealed enroll"),
+        "{text}"
+    );
+    assert!(!text.contains("sealed.recipients"), "{text}");
 }
 
 // ===================== 6. Wrong-format bundle header =====================

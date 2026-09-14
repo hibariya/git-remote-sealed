@@ -441,7 +441,8 @@ pub fn sealed_git(
     cmd.output().expect("git must be runnable")
 }
 
-/// Run the binary's subcommands (`info`, `forget`, `compact`) inside `cwd`.
+/// Run the binary's subcommands (`info`, `enroll`, `revoke`, `upgrade`,
+/// `compact`, `forget`) inside `cwd`.
 pub fn cli(cwd: &Path, identity: &Path, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_git-remote-sealed"));
     cmd.args(args)
@@ -682,9 +683,19 @@ impl Lab {
     }
 
     pub fn compact_ok(&self, repo: &Path) -> String {
-        let out = cli(repo, &self.id_file, &["compact", "origin"]);
-        assert_ok(&out, "git-remote-sealed compact");
+        self.cli_ok(repo, &["compact", "origin"])
+    }
+
+    /// A subcommand with this lab's identity, asserting success; stdout.
+    pub fn cli_ok(&self, repo: &Path, args: &[&str]) -> String {
+        let out = cli(repo, &self.id_file, args);
+        assert_ok(&out, &format!("git-remote-sealed {}", args.join(" ")));
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// §9.1: `enroll <key> origin`, asserting success; stdout.
+    pub fn enroll_ok(&self, repo: &Path, key: &Recipient) -> String {
+        self.cli_ok(repo, &["enroll", &key.to_string(), "origin"])
     }
 
     pub fn manifest(&self) -> Manifest {

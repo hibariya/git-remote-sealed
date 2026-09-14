@@ -1,9 +1,17 @@
 //! User-facing subcommands of the `git-remote-sealed` binary, run inside a
 //! repository:
 //!
-//! - `info [<remote-or-url>]` — read-only, offline: the vault URL, the
-//!   identity file, this device's recipient(s), the extras from
-//!   `sealed.recipients`, and the join line for a new device;
+//! - `info [<remote-or-url>]` — read-only: the vault URL, the identity
+//!   file, this device's recipient(s), what the pin remembers, and the
+//!   recipient set the vault's manifest declares (a listing-only read, §6
+//!   steps 1–4, which persists nothing);
+//! - `enroll <age1…> [<remote-or-url>]` — §9.1: add a recipient and compact,
+//!   so the whole history is readable by it;
+//! - `revoke [--yes] <age1…> [<remote-or-url>]` — §9.1: remove a recipient
+//!   and compact; `--yes` is required to remove this device's own key;
+//! - `upgrade [--yes] [<remote-or-url>]` — §9.2: record the recipient set
+//!   in a vault written before the manifest declared one; `--yes` accepts
+//!   the set when the ciphertext's recipient count cannot be determined;
 //! - `forget --yes [<remote-or-url>]` — §7.5: discard this repository's
 //!   mirror and vault binding for that remote, and the vault's pin and
 //!   sequence memory unless another remote URL of this repository is still
@@ -16,13 +24,18 @@
 //! get-url`) or given as a `sealed::<url>` URL. With no argument, the one
 //! `sealed::` remote of the repository is used.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
+use std::str::FromStr;
 
-use crate::compact;
+use age::x25519::Recipient;
+
+use crate::compact::{self, Compaction, SetChange};
 use crate::helper::strip_scheme;
 use crate::pinstore::{PinError, PinStore};
+use crate::reader::{self, Inspection};
 use crate::settings::{Settings, SettingsError};
 use crate::srcrepo;
 use crate::vaultrepo::{self, GitError, VaultRepo};
@@ -38,6 +51,19 @@ pub enum Command {
         remote: Option<String>,
     },
     Compact {
+        remote: Option<String>,
+    },
+    Enroll {
+        key: String,
+        remote: Option<String>,
+    },
+    Revoke {
+        key: String,
+        yes: bool,
+        remote: Option<String>,
+    },
+    Upgrade {
+        yes: bool,
         remote: Option<String>,
     },
     /// `--version` / `-V`. Prints the tool version AND the format version,
@@ -66,6 +92,11 @@ pub enum CliError {
     ForgetRefused {
         remote: String,
     },
+    /// `enroll`/`revoke` with something that is not an age recipient.
+    BadRecipient {
+        token: String,
+        detail: String,
+    },
     Io(String),
 }
 
@@ -88,6 +119,10 @@ impl fmt::Display for CliError {
                  Only do this for a vault you deliberately deleted and re-created at the same\n\
                  URL (a new vault at a new URL needs no forget). To proceed:\n\
                  \x20   git-remote-sealed forget --yes {remote}"
+            ),
+            CliError::BadRecipient { token, detail } => write!(
+                f,
+                "{token:?} is not an age recipient ({detail}); expected the PUBLIC half of a key, `age1...`"
             ),
             CliError::Io(e) => write!(f, "I/O error: {e}"),
         }
@@ -119,45 +154,56 @@ impl From<PinError> for CliError {
 
 pub const USAGE: &str = "usage: git-remote-sealed <remote> <url>            (invoked by git)\n\
        git-remote-sealed info [<remote-or-url>]\n\
-       git-remote-sealed forget --yes [<remote-or-url>]\n\
+       git-remote-sealed enroll <age1...> [<remote-or-url>]\n\
+       git-remote-sealed revoke [--yes] <age1...> [<remote-or-url>]\n\
+       git-remote-sealed upgrade [--yes] [<remote-or-url>]\n\
        git-remote-sealed compact [<remote-or-url>]\n\
-       git-remote-sealed --version | --help";
+       git-remote-sealed forget --yes [<remote-or-url>]\n\
+       git-remote-sealed --version | --help\n\
+\n\
+  info      show the identity, the pin, and the recipients the vault records\n\
+  enroll    add a recipient (a device or a recovery key, its PUBLIC age1... half)\n\
+            and compact, so the whole history becomes readable by it\n\
+  revoke    remove a recipient and compact (--yes to remove this device's own)\n\
+  upgrade   record the recipient set in a vault written before 0.3.0; it must\n\
+            match the number of keys the vault is encrypted to (--yes when\n\
+            that number cannot be determined)\n\
+  compact   rewrite the vault as one snapshot; deleted history leaves the host\n\
+  forget    discard this repository's memory of the vault (read the warning)\n\
+\n\
+  The identity comes from SEALED_IDENTITY or `git config sealed.identity`.\n\
+  Recipients live in the vault's manifest, not in config; the first push\n\
+  declares this device's key, `enroll` adds the others.";
 
 /// Recognize a subcommand invocation. `None` = not a subcommand (git's
-/// `<remote> <url>` form). A remote literally named `info`, `forget`, or
-/// `compact` cannot be driven by git through this binary (documented
-/// limitation).
+/// `<remote> <url>` form). A remote literally named like a subcommand
+/// cannot be driven by git through this binary (documented limitation).
 pub fn parse_args(args: &[String]) -> Option<Result<Command, CliError>> {
     let (name, rest) = args.split_first()?;
     let cmd = match name.as_str() {
-        "info" => match rest {
-            [] => Ok(Command::Info { remote: None }),
-            [r] => Ok(Command::Info {
-                remote: Some(r.clone()),
-            }),
-            _ => Err(CliError::Usage(USAGE.into())),
-        },
-        "forget" => {
-            let mut yes = false;
-            let mut remote = None;
-            for a in rest {
-                if a == "--yes" {
-                    yes = true;
-                } else if remote.is_none() && !a.starts_with('-') {
-                    remote = Some(a.clone());
-                } else {
-                    return Some(Err(CliError::Usage(USAGE.into())));
-                }
-            }
-            Ok(Command::Forget { yes, remote })
-        }
-        "compact" => match rest {
-            [] => Ok(Command::Compact { remote: None }),
-            [r] => Ok(Command::Compact {
-                remote: Some(r.clone()),
-            }),
-            _ => Err(CliError::Usage(USAGE.into())),
-        },
+        "info" => positional(rest, 0, 1).map(|(_, p)| Command::Info {
+            remote: p.into_iter().next(),
+        }),
+        "forget" => positional(rest, 0, 1).map(|(yes, p)| Command::Forget {
+            yes,
+            remote: p.into_iter().next(),
+        }),
+        "compact" => positional(rest, 0, 1).map(|(_, p)| Command::Compact {
+            remote: p.into_iter().next(),
+        }),
+        "enroll" => positional(rest, 1, 2).map(|(_, mut p)| Command::Enroll {
+            key: p.remove(0),
+            remote: p.into_iter().next(),
+        }),
+        "revoke" => positional(rest, 1, 2).map(|(yes, mut p)| Command::Revoke {
+            key: p.remove(0),
+            yes,
+            remote: p.into_iter().next(),
+        }),
+        "upgrade" => positional(rest, 0, 1).map(|(yes, p)| Command::Upgrade {
+            yes,
+            remote: p.into_iter().next(),
+        }),
         // Before the `<remote> <url>` fallthrough: git never invokes a
         // remote helper with these, and a vault URL cannot look like one.
         "--version" | "-V" if rest.is_empty() => Ok(Command::Version),
@@ -167,11 +213,42 @@ pub fn parse_args(args: &[String]) -> Option<Result<Command, CliError>> {
     Some(cmd)
 }
 
+/// `--yes` anywhere, plus `min..=max` positional arguments; anything else
+/// is a usage error.
+fn positional(rest: &[String], min: usize, max: usize) -> Result<(bool, Vec<String>), CliError> {
+    let mut yes = false;
+    let mut args = Vec::new();
+    for a in rest {
+        if a == "--yes" {
+            yes = true;
+        } else if a.starts_with('-') {
+            return Err(CliError::Usage(USAGE.into()));
+        } else {
+            args.push(a.clone());
+        }
+    }
+    if args.len() < min || args.len() > max {
+        return Err(CliError::Usage(USAGE.into()));
+    }
+    Ok((yes, args))
+}
+
 pub fn run(cmd: Command, out: &mut dyn Write) -> Result<(), CliError> {
     match cmd {
         Command::Info { remote } => info(remote.as_deref(), out),
         Command::Forget { yes, remote } => forget(yes, remote.as_deref(), out),
         Command::Compact { remote } => run_compact(remote.as_deref(), out),
+        Command::Enroll { key, remote } => {
+            let key = parse_recipient(&key)?;
+            change_set(remote.as_deref(), SetChange::Enroll(key), out)
+        }
+        Command::Revoke { key, yes, remote } => {
+            let key = parse_recipient(&key)?;
+            change_set(remote.as_deref(), SetChange::Revoke { key, yes }, out)
+        }
+        Command::Upgrade { yes, remote } => {
+            change_set(remote.as_deref(), SetChange::Upgrade { yes }, out)
+        }
         Command::Version => writeln!(
             out,
             "git-remote-sealed {} (sealed vault format {})",
@@ -300,6 +377,132 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
         Ok(None) => text.push_str("vault id:   (not yet seen from this repository)\n"),
         Err(e) => text.push_str(&format!("vault id:   (pin unreadable: {e})\n")),
     }
+    // §5: the recipient set is whatever the vault's manifest declares —
+    // read from the vault (steps 1–4 only: nothing is applied or pinned).
+    // A vault this device cannot reach right now still gets the rest.
+    match declared_recipients(&settings, &url) {
+        Ok(Some(set)) if set.is_empty() => text.push_str(
+            "recipients: not recorded in this vault yet (run `git-remote-sealed upgrade`)\n",
+        ),
+        Ok(Some(set)) => {
+            for r in &set {
+                let mark = if own.contains(r) {
+                    " (this device)"
+                } else {
+                    ""
+                };
+                text.push_str(&format!("recipients: {r}{mark}\n"));
+            }
+        }
+        Ok(None) => text.push_str(
+            "recipients: (vault not initialized yet: the first push declares this device's key)\n",
+        ),
+        Err(e) => text.push_str(&format!("recipients: (vault unreadable: {e})\n")),
+    }
+    text.push_str(
+        "            To add a device: run `git-remote-sealed enroll <its age1... key>` here,\n\
+         \x20           then clone there. Keys never move between devices; the new device's\n\
+         \x20           own `git-remote-sealed info` shows the key to enroll.\n",
+    );
+    out.write_all(text.as_bytes())
+        .map_err(|e| CliError::Io(e.to_string()))
+}
+
+/// The recipient set the vault's manifest declares (`None` = empty vault).
+fn declared_recipients(
+    settings: &Settings,
+    url: &str,
+) -> Result<Option<BTreeSet<String>>, CliError> {
+    let vault = VaultRepo::open(&settings.git_dir, url)?;
+    match reader::inspect(&vault, &settings.identities).map_err(WriteError::Read)? {
+        Inspection::Empty => Ok(None),
+        Inspection::Vault(p) => Ok(Some(p.manifest().recipients.clone())),
+    }
+}
+
+fn parse_recipient(token: &str) -> Result<Recipient, CliError> {
+    Recipient::from_str(token).map_err(|detail| CliError::BadRecipient {
+        token: token.to_owned(),
+        detail: detail.to_string(),
+    })
+}
+
+/// `enroll`, `revoke`, `upgrade`: a compaction with a changed set (§9.1,
+/// §9.2), reported with the recorded keys in full — they are what the
+/// other devices must be able to see in `info`.
+fn change_set(
+    remote: Option<&str>,
+    change: SetChange,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let settings = Settings::load()?;
+    let (label, url) = resolve_remote(&settings.git_dir, remote)?;
+    let vault = VaultRepo::open(&settings.git_dir, &url)?;
+    let cfg = settings.writer_config();
+    let outcome = compact::compact(
+        &vault,
+        &settings.git_dir,
+        &settings.identities,
+        &cfg,
+        &change,
+    )?;
+    let own: BTreeSet<String> = cfg.own_recipients.iter().map(ToString::to_string).collect();
+    let listing = |set: &BTreeSet<String>| -> String {
+        set.iter()
+            .map(|r| {
+                let mark = if own.contains(r) {
+                    " (this device)"
+                } else {
+                    ""
+                };
+                format!("    {r}{mark}\n")
+            })
+            .collect()
+    };
+    let text = match (&change, outcome) {
+        (SetChange::Enroll(key), Compaction::NothingToDo { recipients }) => format!(
+            "{key} is already a recipient of {label}; nothing to do.\nrecipients ({}):\n{}",
+            recipients.len(),
+            listing(&recipients)
+        ),
+        (SetChange::Revoke { key, .. }, Compaction::NothingToDo { recipients }) => format!(
+            "{key} is not a recipient of {label}; nothing to do.\nrecipients ({}):\n{}",
+            recipients.len(),
+            listing(&recipients)
+        ),
+        (SetChange::Upgrade { .. }, Compaction::NothingToDo { recipients }) => format!(
+            "{label} already records {} recipients; nothing to do.\nrecipients:\n{}",
+            recipients.len(),
+            listing(&recipients)
+        ),
+        (SetChange::Keep, Compaction::NothingToDo { .. }) => unreachable!("Keep always compacts"),
+        (change, Compaction::Done(report)) => {
+            let what = match change {
+                SetChange::Enroll(key) => format!("enrolled {key} in {label}"),
+                SetChange::Revoke { key, .. } => format!(
+                    "revoked {key} from {label}\n\
+                     (not erasure: earlier generations the host may retain stay readable by it, \
+                     and it keeps whatever it already fetched)"
+                ),
+                SetChange::Upgrade { .. } => {
+                    format!("upgraded {label}: its manifest now records its recipients")
+                }
+                SetChange::Keep => unreachable!("compact has its own report"),
+            };
+            let how = match report.allocated {
+                Some(seq) => format!("one -full bundle at sequence {seq}"),
+                None => "zero refs, manifest-only generation".to_owned(),
+            };
+            format!(
+                "{what}.\nThe vault is now encrypted to {} recipient(s):\n{}\
+                 (compacted: {how}, counter {}, attempt {})\n",
+                report.recipients.len(),
+                listing(&report.recipients),
+                report.counter,
+                report.attempts
+            )
+        }
+    };
     out.write_all(text.as_bytes())
         .map_err(|e| CliError::Io(e.to_string()))
 }
@@ -463,5 +666,82 @@ mod tests {
             parse_args(&args(&["forget", "--no"])),
             Some(Err(CliError::Usage(_)))
         ));
+    }
+
+    #[test]
+    fn recipient_verbs_parse() {
+        let key = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p";
+        assert_eq!(
+            parse_args(&args(&["enroll", key])).map(Result::ok),
+            Some(Some(Command::Enroll {
+                key: key.into(),
+                remote: None
+            }))
+        );
+        assert_eq!(
+            parse_args(&args(&["enroll", key, "origin"])).map(Result::ok),
+            Some(Some(Command::Enroll {
+                key: key.into(),
+                remote: Some("origin".into())
+            }))
+        );
+        assert_eq!(
+            parse_args(&args(&["revoke", "--yes", key])).map(Result::ok),
+            Some(Some(Command::Revoke {
+                key: key.into(),
+                yes: true,
+                remote: None
+            }))
+        );
+        assert_eq!(
+            parse_args(&args(&["revoke", key, "origin", "--yes"])).map(Result::ok),
+            Some(Some(Command::Revoke {
+                key: key.into(),
+                yes: true,
+                remote: Some("origin".into())
+            }))
+        );
+        assert_eq!(
+            parse_args(&args(&["upgrade"])).map(Result::ok),
+            Some(Some(Command::Upgrade {
+                yes: false,
+                remote: None
+            }))
+        );
+        assert_eq!(
+            parse_args(&args(&["upgrade", "--yes", "sealed::/v"])).map(Result::ok),
+            Some(Some(Command::Upgrade {
+                yes: true,
+                remote: Some("sealed::/v".into())
+            }))
+        );
+        // The key is required, and only one remote fits.
+        assert!(matches!(
+            parse_args(&args(&["enroll"])),
+            Some(Err(CliError::Usage(_)))
+        ));
+        assert!(matches!(
+            parse_args(&args(&["revoke", key, "a", "b"])),
+            Some(Err(CliError::Usage(_)))
+        ));
+        // Not a recipient: refused at run time, before any vault work.
+        let mut out = Vec::new();
+        assert!(matches!(
+            run(
+                Command::Enroll {
+                    key: "AGE-SECRET-KEY-1NOTPUBLIC".into(),
+                    remote: None
+                },
+                &mut out
+            ),
+            Err(CliError::BadRecipient { .. })
+        ));
+        // Help names every verb.
+        for verb in ["enroll", "revoke", "upgrade", "compact", "forget", "info"] {
+            assert!(
+                USAGE.contains(&format!("git-remote-sealed {verb}")),
+                "{verb}"
+            );
+        }
     }
 }

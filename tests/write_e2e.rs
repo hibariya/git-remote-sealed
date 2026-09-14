@@ -853,9 +853,7 @@ fn init_declares_this_devices_own_recipient_only() {
 fn info_prints_recipients_and_forget_needs_yes() {
     // (l)
     let lab = Lab::new("w-info-forget");
-    let extra = Identity::generate().to_public().to_string();
     let src = lab.source("src");
-    git(&src.dir, &["config", "sealed.recipients", &extra]);
     let own = lab.identity.to_public().to_string();
 
     let out = cli(&src.dir, &lab.id_file, &["info", "origin"]);
@@ -866,11 +864,7 @@ fn info_prints_recipients_and_forget_needs_yes() {
         "{text}"
     );
     assert!(
-        text.contains(&format!("extra:      {extra} (sealed.recipients)")),
-        "{text}"
-    );
-    assert!(
-        text.contains(&format!("join:       {own} {extra}")),
+        text.contains("recipients: (vault not initialized yet"),
         "{text}"
     );
     assert!(text.contains(&lab.remote.sealed_url()), "{text}");
@@ -881,6 +875,14 @@ fn info_prints_recipients_and_forget_needs_yes() {
     // A clone pinned at generation 2 refuses a rollback to generation 1...
     let c1 = src.commit_file("note.md", "one\n", "first");
     lab.push_ok(&src.dir, &["main"]);
+    // ...and `info` now shows the set the manifest declares.
+    let out = cli(&src.dir, &lab.id_file, &["info"]);
+    assert_ok(&out, "info after the first push");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!("recipients: {own} (this device)")),
+        "{text}"
+    );
     let gen1 = lab.remote.tip("main");
     let dest = lab.clone_ok("clone");
     src.commit_file("note.md", "two\n", "second");
