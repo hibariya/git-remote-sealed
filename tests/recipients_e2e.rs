@@ -111,7 +111,7 @@ fn seqs(m: &Manifest) -> Vec<(u64, bool)> {
 
 #[test]
 fn enroll_makes_the_whole_history_readable_by_the_new_key_alone() {
-    // README "Adding a device or a recovery key" / §9.1: adding a recipient
+    // README "Adding a device" / §9.1: adding a recipient
     // is a compaction encrypted to the new set, "so a device added this
     // way reads the whole history from its first fetch" — a fresh clone
     // holding ONLY the second identity gets every commit.
