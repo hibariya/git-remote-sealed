@@ -1,8 +1,6 @@
 # Changelog
 
-## Unreleased
-
-Fixes from a review of 0.3.0.
+## 0.3.1 — fixes from a review of 0.3.0
 
 The declared-vs-actual recipient check:
 
