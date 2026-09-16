@@ -479,6 +479,11 @@ fn change_set(
         &cfg,
         &change,
     )?;
+    if let Compaction::Done(report) = &outcome {
+        for w in &report.warnings {
+            eprintln!("git-remote-sealed: warning: {w}");
+        }
+    }
     let own: BTreeSet<String> = cfg.own_recipients.iter().map(ToString::to_string).collect();
     let listing = |set: &BTreeSet<String>| -> String {
         set.iter()

@@ -16,6 +16,19 @@ The declared-vs-actual recipient check:
 - The check runs after the rollback and vault-identity checks, so a
   replayed generation is reported as a rollback, not as a writer bug.
 
+The old `sealed.recipients` setting:
+
+- The first push to a new vault, refused because a leftover (usually
+  global) `sealed.recipients` named another device, now says what to
+  do: remove the entry, push, then `enroll` the key. README says in
+  which order to upgrade old vaults and delete the setting.
+- `revoke <key>` no longer fails when `sealed.recipients` still names
+  that key. It proceeds and asks you to remove the entry.
+- The "ignored since 0.3.0" warning prints once per command, not once
+  per retry.
+- A leftover `sealed.allow-recipient-shrink` gets a warning naming
+  `revoke` as its replacement, instead of being ignored in silence.
+
 Command-line: a flag a command does not take (`info --yes`,
 `compact --yes`) is a usage error again.
 

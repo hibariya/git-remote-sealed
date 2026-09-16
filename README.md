@@ -76,6 +76,11 @@ the vault is already encrypted to. If it does not, the upgrade is
 refused and prints both numbers. After the upgrade, delete
 `sealed.recipients` from your git config; `enroll` replaces it.
 
+Do it in this order: upgrade every old vault first, then delete the
+setting, then create new vaults. A leftover `sealed.recipients` in your
+global git config blocks the first push to a new vault, because a new
+vault starts with this device's key only.
+
 0.2.x can still read a vault written by 0.3.0, but cannot push to it.
 Upgrade each device before it pushes again. See
 [CHANGELOG.md](CHANGELOG.md).

@@ -39,8 +39,8 @@ use crate::pinstore;
 use crate::reader::{self, Inspection, Prepared, RecipientMismatch};
 use crate::vaultrepo::{PushOutcome, VaultRepo};
 use crate::writer::{
-    self, advanced_pin, build_commit, preserved_entries, WriteError, WriterConfig, MAX_ATTEMPTS,
-    MAX_INDETERMINATE_ATTEMPTS,
+    self, advanced_pin, build_commit, preserved_entries, LegacyCheck, WriteError, WriterConfig,
+    MAX_ATTEMPTS, MAX_INDETERMINATE_ATTEMPTS,
 };
 use crate::FORMAT_VERSION;
 
@@ -56,6 +56,8 @@ pub struct CompactReport {
     /// §5: the mismatch the generation this one replaced had, when this
     /// was a `SetChange::Keep { repair: true }` that found one.
     pub repaired: Option<RecipientMismatch>,
+    /// What the user should hear once (see `writer::PushReport`).
+    pub warnings: Vec<String>,
 }
 
 /// What a compaction does to the recipient set.
@@ -108,7 +110,8 @@ pub fn compact(
         };
         // The set the new generation declares and is encrypted to. Decided
         // per attempt: a retry reads a newer manifest, whose set may differ.
-        let recipients = match new_set(&p, cfg, change)? {
+        let mut warnings = Vec::new();
+        let recipients = match new_set(&p, cfg, change, &mut warnings)? {
             Some(set) => set,
             None => {
                 return Ok(Compaction::NothingToDo {
@@ -234,6 +237,7 @@ pub fn compact(
                     attempts: attempt,
                     recipients: declared,
                     repaired: p.recipient_mismatch().cloned(),
+                    warnings,
                 }));
             }
             PushOutcome::Rejected(summary) => {
@@ -271,6 +275,7 @@ fn new_set(
     p: &Prepared,
     cfg: &WriterConfig,
     change: &SetChange,
+    warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<Recipient>>, WriteError> {
     let m = p.manifest();
     if let SetChange::Upgrade { yes } = change {
@@ -320,6 +325,7 @@ fn new_set(
     // refuses a pre-recipient vault — the only write it takes is Upgrade).
     let current = writer::writable_set(p, cfg)?;
     let mut set: BTreeSet<String> = m.recipients.clone();
+    let mut check = LegacyCheck::Existing;
     match change {
         SetChange::Keep { .. } => {}
         SetChange::Enroll(key) => {
@@ -332,6 +338,7 @@ fn new_set(
             if !set.remove(&key_s) {
                 return Ok(None);
             }
+            check = LegacyCheck::Revoke(key_s.clone());
             // §9.1: the new set MUST be non-empty.
             if set.is_empty() {
                 return Err(WriteError::EmptyRecipientSet);
@@ -345,8 +352,9 @@ fn new_set(
         }
         SetChange::Upgrade { .. } => unreachable!("handled above"),
     }
-    // The legacy list is judged against the set this generation declares.
-    writer::check_legacy_config(&set, cfg)?;
+    // The legacy list is judged against the set this generation declares —
+    // except that a revoke may remove a key the list still names.
+    warnings.extend(writer::check_legacy_config(&set, cfg, check)?);
     // Rebuild in the set's (bytewise) order from parsed recipients: the
     // manifest's own members were parsed by `writable_set`, the change's
     // key is already a `Recipient`.

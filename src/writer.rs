@@ -86,11 +86,15 @@ pub enum WriteError {
         would_record: Vec<String>,
         stanzas: Option<HeaderStanzas>,
     },
-    /// The legacy `sealed.recipients` names a key the manifest's set does
-    /// not have. Ignoring it would silently drop a recipient the user
-    /// meant to have; obeying it is not this version's job (§9.1).
+    /// The legacy `sealed.recipients` names a key the generation being
+    /// written will not have. Ignoring it would silently drop a recipient
+    /// the user meant to have; obeying it is not this version's job (§9.1).
+    /// `new_vault`: the write initializes a vault, whose set is this
+    /// device's own keys — the fix is to remove the entry, push, then
+    /// `enroll` the key, not to enroll it first (there is no vault yet).
     StaleRecipientConfig {
         key: String,
+        new_vault: bool,
     },
     /// The manifest declares a recipient this implementation cannot
     /// encrypt to (§5: X25519 is the baseline; other types are optional).
@@ -192,11 +196,24 @@ impl fmt::Display for WriteError {
                     bullet_list(would_record)
                 )
             }
-            WriteError::StaleRecipientConfig { key } => write!(
+            WriteError::StaleRecipientConfig {
+                key,
+                new_vault: true,
+            } => write!(
+                f,
+                "`sealed.recipients` names {key}, but a new vault is encrypted to this device's own key only. \
+                 sealed.recipients is ignored since 0.3.0 — the vault's manifest declares the set — so this would silently drop that key. \
+                 Remove it from config (`git config --show-origin --get-all sealed.recipients`; a global entry can be moved into the repositories of the vaults that use it), \
+                 push, then run `git-remote-sealed enroll {key}` to add it"
+            ),
+            WriteError::StaleRecipientConfig {
+                key,
+                new_vault: false,
+            } => write!(
                 f,
                 "`sealed.recipients` names {key}, which is not a recipient of this vault. \
                  sealed.recipients is ignored since 0.3.0 — the vault's manifest declares the set — so this would silently drop that key: \
-                 run `git-remote-sealed enroll {key}` to add it (after the first push, for a new vault), or remove it from config (`git config --show-origin --get-all sealed.recipients`)"
+                 run `git-remote-sealed enroll {key}` to add it, or remove it from config (`git config --show-origin --get-all sealed.recipients`)"
             ),
             WriteError::UnsupportedRecipient(r) => write!(
                 f,
@@ -367,6 +384,9 @@ pub struct PushReport {
     /// `None` when every update was a no-op or refused: nothing was written
     /// and the counter did not move.
     pub written: Option<Written>,
+    /// What the user should hear once — not once per attempt, which is
+    /// why the write collects them instead of printing.
+    pub warnings: Vec<String>,
 }
 
 /// Writer-local policy (§4.2 threshold) and what this device knows about
@@ -444,28 +464,56 @@ pub(crate) fn writable_set(p: &Prepared, cfg: &WriterConfig) -> Result<Vec<Recip
     recipients_of(m)
 }
 
+/// Which write is judging the legacy list: it decides what the list may
+/// name and what the refusal advises.
+#[derive(Debug, Clone)]
+pub(crate) enum LegacyCheck {
+    /// A vault-initializing push (§8): the set is this device's own keys,
+    /// so a configured other key cannot be in it yet.
+    Init,
+    /// Any write to an existing vault: a push, a compaction, an enroll.
+    Existing,
+    /// A revoke of the key: a list still naming it is one step behind, not
+    /// stale — the revoke proceeds and the warning says to remove it.
+    Revoke(String),
+}
+
 /// `sealed.recipients` is not an input any more, but it is not ignored
 /// blindly either: a key it names that the generation being written will
 /// not have is refused (the user meant to have it; `enroll` is how — and
 /// an `enroll` of that very key passes, since `declared` is the new set),
-/// and a list the vault covers just earns a reminder to remove it.
+/// and a list the vault covers just earns a reminder to remove it. The
+/// reminder is returned, not printed: writes retry, and the user should
+/// read it once.
 pub(crate) fn check_legacy_config(
     declared: &BTreeSet<String>,
     cfg: &WriterConfig,
-) -> Result<(), WriteError> {
+    check: LegacyCheck,
+) -> Result<Option<String>, WriteError> {
     if cfg.legacy_recipients.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
+    let mut names_revoked = None;
     for r in &cfg.legacy_recipients {
         let key = r.to_string();
-        if !declared.contains(&key) {
-            return Err(WriteError::StaleRecipientConfig { key });
+        if declared.contains(&key) {
+            continue;
         }
+        if matches!(&check, LegacyCheck::Revoke(revoked) if *revoked == key) {
+            names_revoked = Some(key);
+            continue;
+        }
+        return Err(WriteError::StaleRecipientConfig {
+            key,
+            new_vault: matches!(check, LegacyCheck::Init),
+        });
     }
-    eprintln!(
-        "git-remote-sealed: warning: sealed.recipients is ignored since 0.3.0 (the vault's manifest declares its recipients; use `git-remote-sealed enroll` to add one); remove it from config: git config --show-origin --get-all sealed.recipients"
-    );
-    Ok(())
+    Ok(Some(match names_revoked {
+        Some(key) => format!(
+            "sealed.recipients still names {key}, the key being revoked; remove it from config or the next write is refused: git config --show-origin --get-all sealed.recipients"
+        ),
+        None => "sealed.recipients is ignored since 0.3.0 (the vault's manifest declares its recipients; use `git-remote-sealed enroll` to add one); remove it from config: git config --show-origin --get-all sealed.recipients".to_owned(),
+    }))
 }
 
 /// One update after resolving its source: the new object and its type.
@@ -618,6 +666,7 @@ impl Ctx<'_> {
             return Ok(Attempt::Done(PushReport {
                 results,
                 written: None,
+                warnings: Vec::new(),
             }));
         }
         let of = ObjectFormat::from_str_exact(self.local_format)
@@ -632,7 +681,9 @@ impl Ctx<'_> {
             return Err(WriteError::EmptyRecipientSet);
         }
         let declared: BTreeSet<String> = recipients.iter().map(ToString::to_string).collect();
-        check_legacy_config(&declared, self.cfg)?;
+        let warnings: Vec<String> = check_legacy_config(&declared, self.cfg, LegacyCheck::Init)?
+            .into_iter()
+            .collect();
 
         let scratch = self.vault.scratch_dir()?;
         let bundle = bundling::create(
@@ -728,6 +779,7 @@ impl Ctx<'_> {
                             attempts: self.attempt,
                             initialized: true,
                         }),
+                        warnings,
                     }));
                     break;
                 }
@@ -772,7 +824,10 @@ impl Ctx<'_> {
         // the set to encrypt to is the manifest's (§8 "Recipient set").
         let recipients = writable_set(p, self.cfg)?;
         let m = p.manifest();
-        check_legacy_config(&m.recipients, self.cfg)?;
+        let warnings: Vec<String> =
+            check_legacy_config(&m.recipients, self.cfg, LegacyCheck::Existing)?
+                .into_iter()
+                .collect();
         // §8 preamble: object format equality.
         if self.local_format != m.object_format.as_str() {
             return Err(WriteError::ObjectFormatMismatch {
@@ -787,6 +842,7 @@ impl Ctx<'_> {
             return Ok(Attempt::Done(PushReport {
                 results,
                 written: None,
+                warnings,
             }));
         }
 
@@ -965,6 +1021,7 @@ impl Ctx<'_> {
                         attempts: self.attempt,
                         initialized: false,
                     }),
+                    warnings,
                 }))
             }
             PushOutcome::Rejected(summary) => {

@@ -303,6 +303,9 @@ pub fn serve<R: BufRead, W: Write>(
                 let mut status = String::new();
                 match session.push(&updates) {
                     Ok(report) => {
+                        for w in &report.warnings {
+                            eprintln!("git-remote-sealed: warning: {w}");
+                        }
                         for r in &report.results {
                             match &r.error {
                                 None => status.push_str(&format!("ok {}\n", r.dst)),

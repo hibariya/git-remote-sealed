@@ -810,15 +810,20 @@ fn stale_sealed_recipients_warns_when_covered_and_refuses_when_not() {
     let out = lab.push(&src.dir, &["main"]);
     assert!(!out.status.success());
     let err = stderr_of(&out);
-    assert!(err.contains("is not a recipient of this vault"), "{err}");
+    // ...with advice that fits a vault that does not exist yet: remove the
+    // entry, push, THEN enroll (an enroll first has nothing to enroll into).
+    assert!(
+        err.contains("a new vault is encrypted to this device's own key only"),
+        "{err}"
+    );
+    assert!(err.contains("Remove it from config"), "{err}");
     assert!(
         err.contains(&format!(
-            "run `git-remote-sealed enroll {}`",
+            "push, then run `git-remote-sealed enroll {}`",
             second.to_public()
         )),
         "{err}"
     );
-    assert!(err.contains("remove it from config"), "{err}");
     git(&src.dir, &["config", "--unset", "sealed.recipients"]);
     lab.push_ok(&src.dir, &["main"]);
     lab.enroll_ok(&src.dir, &second.to_public());
@@ -892,6 +897,69 @@ fn stale_sealed_recipients_warns_when_covered_and_refuses_when_not() {
     lab.enroll_ok(&src.dir, &third.to_public());
     let out = lab.push(&src.dir, &["main"]);
     assert_ok(&out, "push once the key is enrolled");
-    assert!(stderr_of(&out).contains("warning: sealed.recipients is ignored"));
+    let err = stderr_of(&out);
+    assert_eq!(
+        err.matches("warning: sealed.recipients is ignored").count(),
+        1,
+        "once per push, not per attempt: {err}"
+    );
     assert_eq!(lab.manifest().recipients.len(), 3);
+
+    // A revoke of a key the list still names is not a stale list — the
+    // list is one step behind. The revoke proceeds and says to remove it.
+    let out = cli(
+        &src.dir,
+        &lab.id_file,
+        &["revoke", &third.to_public().to_string(), "origin"],
+    );
+    assert_ok(&out, "revoke of a key the legacy list names");
+    let err = stderr_of(&out);
+    assert!(
+        err.contains(&format!(
+            "sealed.recipients still names {}, the key being revoked; remove it from config",
+            third.to_public()
+        )),
+        "{err}"
+    );
+    assert_eq!(lab.manifest().recipients.len(), 2);
+    // Left in place, it is now a stale entry like any other.
+    src.commit_file("note.md", "four\n", "fourth");
+    let out = lab.push(&src.dir, &["main"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("not a recipient of this vault"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
+fn allow_recipient_shrink_left_in_config_is_named_as_obsolete() {
+    // 0.2.x's `sealed.allow-recipient-shrink` opt-in is gone (`revoke`
+    // replaced it). A value left behind is not ignored in silence: the
+    // user who set it is the one about to meet the upgrade count check.
+    let lab = Lab::new("r-shrink-config");
+    let src = lab.source("src");
+    git(
+        &src.dir,
+        &["config", "sealed.allow-recipient-shrink", "true"],
+    );
+    let out = cli(&src.dir, &lab.id_file, &["info", "origin"]);
+    assert_ok(&out, "info");
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("warning: sealed.allow-recipient-shrink has no effect since 0.3.0"),
+        "{err}"
+    );
+    assert!(err.contains("`git-remote-sealed revoke"), "{err}");
+    git(
+        &src.dir,
+        &["config", "--unset", "sealed.allow-recipient-shrink"],
+    );
+    let out = cli(&src.dir, &lab.id_file, &["info", "origin"]);
+    assert!(
+        !stderr_of(&out).contains("allow-recipient-shrink"),
+        "{}",
+        stderr_of(&out)
+    );
 }

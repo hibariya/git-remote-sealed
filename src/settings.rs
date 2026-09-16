@@ -133,6 +133,16 @@ impl Settings {
             }
         }
 
+        // 0.2.x's opt-in for writing with fewer recipients than the vault
+        // has. `revoke` replaced it (0.3.0); a value left behind would
+        // otherwise be ignored without a word, and its owner is exactly
+        // the user the upgrade's count check is about to confuse.
+        if srcrepo::config_get(&git_dir, "sealed.allow-recipient-shrink")?.is_some() {
+            eprintln!(
+                "git-remote-sealed: warning: sealed.allow-recipient-shrink has no effect since 0.3.0 (`git-remote-sealed revoke <age1...>` removes a key); remove it from config: git config --show-origin --get-all sealed.allow-recipient-shrink"
+            );
+        }
+
         let chunk_mb = match srcrepo::config_get(&git_dir, "sealed.chunk-mb")? {
             None => DEFAULT_CHUNK_MB,
             Some(v) => v
