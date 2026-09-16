@@ -29,8 +29,15 @@ The old `sealed.recipients` setting:
 - A leftover `sealed.allow-recipient-shrink` gets a warning naming
   `revoke` as its replacement, instead of being ignored in silence.
 
-Command-line: a flag a command does not take (`info --yes`,
-`compact --yes`) is a usage error again.
+Command-line:
+
+- `info` prints the identity, this device's key and the pin before it
+  contacts the vault, so the key to enroll elsewhere shows even when the
+  remote is unreachable or another command holds the lock.
+- The "written before recipients were recorded" refusal names every
+  write it applies to (push, enroll, revoke, compact), not only push.
+- A flag a command does not take (`info --yes`, `compact --yes`) is a
+  usage error again.
 
 ## 0.3.0 — recipients are recorded in the vault
 

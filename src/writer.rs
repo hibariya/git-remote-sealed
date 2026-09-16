@@ -189,8 +189,9 @@ impl fmt::Display for WriteError {
                 };
                 write!(
                     f,
-                    "this vault was written before recipients were recorded in the manifest, so a push cannot know whom to encrypt to; it accepts no pushes until it is upgraded once.\n\
-                     Run `git-remote-sealed upgrade` here. It would record {} recipient(s):\n{}\n\
+                    "this vault was written before recipients were recorded in the manifest, so no write (a push, enroll, revoke or compact) can know whom to encrypt to; \
+                     the only write it accepts is `git-remote-sealed upgrade`, once.\n\
+                     Run it here. It would record {} recipient(s):\n{}\n\
                      (this device's identity plus `sealed.recipients`); the manifest ciphertext is encrypted to {ciphertext}, and the two counts must agree",
                     would_record.len(),
                     bullet_list(would_record)
@@ -435,33 +436,38 @@ fn bullet_list(items: &[String]) -> String {
         .join("\n")
 }
 
-/// The manifest's declared set as age recipients, in the manifest's order
-/// (§5: a writer learns whom to encrypt to from the manifest it validated).
-pub(crate) fn recipients_of(m: &Manifest) -> Result<Vec<Recipient>, WriteError> {
+/// A declared set as age recipients, in its (bytewise) order (§5: a writer
+/// learns whom to encrypt to from the manifest it validated — or from that
+/// set changed per §9.1).
+pub(crate) fn recipients_of(set: &BTreeSet<String>) -> Result<Vec<Recipient>, WriteError> {
     use std::str::FromStr;
-    m.recipients
-        .iter()
+    set.iter()
         .map(|r| Recipient::from_str(r).map_err(|_| WriteError::UnsupportedRecipient(r.clone())))
         .collect()
 }
 
-/// What a write against an existing vault must establish before it
+/// §5/§8: what every write but the §9.2 upgrade meets on a pre-recipient
+/// vault — with what that upgrade would record, so the user can judge it.
+pub(crate) fn pre_recipient_refusal(p: &Prepared, cfg: &WriterConfig) -> WriteError {
+    WriteError::PreRecipientVault {
+        would_record: cfg.upgrade_set().iter().map(ToString::to_string).collect(),
+        stanzas: p.manifest_stanzas().cloned(),
+    }
+}
+
+/// What a push against an existing vault must establish before it
 /// allocates anything: §7.3 (read-only against unknown lines) and §5/§8
 /// (no push to a pre-recipient vault). Returns the set to encrypt to — the
-/// manifest's. The caller runs `check_legacy_config` against the set it
-/// will actually declare (a push: this one; enroll/revoke: the changed one).
+/// manifest's. The caller runs `check_legacy_config` against it.
 pub(crate) fn writable_set(p: &Prepared, cfg: &WriterConfig) -> Result<Vec<Recipient>, WriteError> {
     if p.writer_must_be_read_only() {
         return Err(WriteError::ReadOnlyVault);
     }
     let m = p.manifest();
     if m.is_pre_recipient() {
-        return Err(WriteError::PreRecipientVault {
-            would_record: cfg.upgrade_set().iter().map(ToString::to_string).collect(),
-            stanzas: p.manifest_stanzas().cloned(),
-        });
+        return Err(pre_recipient_refusal(p, cfg));
     }
-    recipients_of(m)
+    recipients_of(&m.recipients)
 }
 
 /// Which write is judging the legacy list: it decides what the list may

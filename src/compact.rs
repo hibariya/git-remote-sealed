@@ -269,61 +269,28 @@ pub fn compact(
 }
 
 /// The recipient set the new generation gets, or `None` when the change
-/// is already in effect. Every branch runs §7.3's read-only rule first: a
-/// manifest with unknown lines is not rewritten by anyone.
+/// is already in effect.
 fn new_set(
     p: &Prepared,
     cfg: &WriterConfig,
     change: &SetChange,
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<Recipient>>, WriteError> {
-    let m = p.manifest();
-    if let SetChange::Upgrade { yes } = change {
-        if p.writer_must_be_read_only() {
-            return Err(WriteError::ReadOnlyVault);
-        }
-        // §9.2: idempotent — a vault that records its set is left alone.
-        if !m.is_pre_recipient() {
-            return Ok(None);
-        }
-        let set = cfg.upgrade_set();
-        let would_record: Vec<String> = set.iter().map(ToString::to_string).collect();
-        match p.manifest_stanzas() {
-            // The count can be determined: it MUST equal the set's size,
-            // smaller and larger alike.
-            Some(h) if h.other() == 0 => {
-                if set.len() != h.x25519() {
-                    return Err(WriteError::UpgradeCountMismatch {
-                        would_record,
-                        stanzas: h.x25519(),
-                    });
-                }
-            }
-            // Non-X25519 stanzas: the size cannot be checked; the user
-            // confirms the set explicitly.
-            Some(h) if !*yes => {
-                return Err(WriteError::UpgradeCountUnknown {
-                    would_record,
-                    stanzas: h.clone(),
-                });
-            }
-            // No readable header at all. Impossible for a manifest that
-            // just decrypted, but §9.2 says "cannot be determined" means
-            // confirm, not proceed.
-            None if !*yes => {
-                return Err(WriteError::UpgradeCountUnknown {
-                    would_record,
-                    stanzas: crate::crypt::HeaderStanzas::default(),
-                });
-            }
-            _ => {}
-        }
-        return Ok(Some(set));
+    // §7.3 first, whatever the change: a manifest with unknown lines is not
+    // rewritten by anyone.
+    if p.writer_must_be_read_only() {
+        return Err(WriteError::ReadOnlyVault);
     }
-
-    // Keep / Enroll / Revoke: the vault must be writable at all (which
-    // refuses a pre-recipient vault — the only write it takes is Upgrade).
-    let current = writer::writable_set(p, cfg)?;
+    let m = p.manifest();
+    match (change, m.is_pre_recipient()) {
+        // §9.2: the one write a pre-recipient vault takes...
+        (SetChange::Upgrade { yes }, true) => return upgrade_set(p, cfg, *yes).map(Some),
+        // ...and it is idempotent: a vault that records its set is left alone.
+        (SetChange::Upgrade { .. }, false) => return Ok(None),
+        // §5/§9.1: every other change is refused there; §9.2 comes first.
+        (_, true) => return Err(writer::pre_recipient_refusal(p, cfg)),
+        (_, false) => {}
+    }
     let mut set: BTreeSet<String> = m.recipients.clone();
     let mut check = LegacyCheck::Existing;
     match change {
@@ -350,22 +317,51 @@ fn new_set(
                 return Err(WriteError::RevokeOwnKeyNeedsYes { key: key_s });
             }
         }
-        SetChange::Upgrade { .. } => unreachable!("handled above"),
+        SetChange::Upgrade { .. } => unreachable!("returned above"),
     }
     // The legacy list is judged against the set this generation declares —
     // except that a revoke may remove a key the list still names.
     warnings.extend(writer::check_legacy_config(&set, cfg, check)?);
-    // Rebuild in the set's (bytewise) order from parsed recipients: the
-    // manifest's own members were parsed by `writable_set`, the change's
-    // key is already a `Recipient`.
-    let mut by_string: std::collections::BTreeMap<String, Recipient> =
-        current.into_iter().map(|r| (r.to_string(), r)).collect();
-    if let SetChange::Enroll(key) = change {
-        by_string.insert(key.to_string(), key.clone());
+    // Every member is the manifest's (§5: whom to encrypt to) or the
+    // change's key, an age recipient either way; parsing the set is what
+    // refuses a manifest member this implementation cannot encrypt to.
+    Ok(Some(writer::recipients_of(&set)?))
+}
+
+/// §9.2: the set an upgrade records — this device's configured set,
+/// checked against the manifest ciphertext's recipient count.
+fn upgrade_set(p: &Prepared, cfg: &WriterConfig, yes: bool) -> Result<Vec<Recipient>, WriteError> {
+    let set = cfg.upgrade_set();
+    let would_record: Vec<String> = set.iter().map(ToString::to_string).collect();
+    match p.manifest_stanzas() {
+        // The count can be determined: it MUST equal the set's size,
+        // smaller and larger alike.
+        Some(h) if h.other() == 0 => {
+            if set.len() != h.x25519() {
+                return Err(WriteError::UpgradeCountMismatch {
+                    would_record,
+                    stanzas: h.x25519(),
+                });
+            }
+        }
+        // Non-X25519 stanzas: the size cannot be checked; the user
+        // confirms the set explicitly.
+        Some(h) if !yes => {
+            return Err(WriteError::UpgradeCountUnknown {
+                would_record,
+                stanzas: h.clone(),
+            });
+        }
+        // No readable header at all. Impossible for a manifest that
+        // just decrypted, but §9.2 says "cannot be determined" means
+        // confirm, not proceed.
+        None if !yes => {
+            return Err(WriteError::UpgradeCountUnknown {
+                would_record,
+                stanzas: crate::crypt::HeaderStanzas::default(),
+            });
+        }
+        _ => {}
     }
-    Ok(Some(
-        set.iter()
-            .map(|s| by_string.remove(s).expect("every member was parsed"))
-            .collect(),
-    ))
+    Ok(set)
 }

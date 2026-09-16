@@ -549,7 +549,8 @@ fn a_zero_two_one_vault_reads_but_refuses_pushes_until_upgraded() {
     assert!(err.contains("would record 2 recipient(s)"), "{err}");
     assert!(err.contains(&fx.key_b), "{err}");
 
-    // §9.1's verbs are writes too: refused the same way. Only `upgrade` fits.
+    // §9.1's verbs are writes too: refused the same way, in words that fit
+    // them (nobody pushed). Only `upgrade` fits.
     for args in [
         vec!["enroll", &fx.key_b, "origin"],
         vec!["revoke", "--yes", &fx.key_b, "origin"],
@@ -557,10 +558,16 @@ fn a_zero_two_one_vault_reads_but_refuses_pushes_until_upgraded() {
     ] {
         let out = cli(&dest, &fx.id_a, &args);
         assert!(!out.status.success(), "{args:?}");
+        let err = stderr_of(&out);
         assert!(
-            stderr_of(&out).contains("`git-remote-sealed upgrade`"),
-            "{args:?}: {}",
-            stderr_of(&out)
+            err.contains(
+                "no write (a push, enroll, revoke or compact) can know whom to encrypt to"
+            ),
+            "{args:?}: {err}"
+        );
+        assert!(
+            err.contains("the only write it accepts is `git-remote-sealed upgrade`"),
+            "{args:?}: {err}"
         );
     }
     assert_eq!(fx.remote.tip("main"), tip);

@@ -343,12 +343,16 @@ fn resolve_remote(git_dir: &Path, arg: Option<&str>) -> Result<(String, String),
 fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
     let settings = Settings::load()?;
     let (label, url) = resolve_remote(&settings.git_dir, remote)?;
-    let own: Vec<String> = settings
+    let own: BTreeSet<String> = settings
         .own_recipients()
         .iter()
         .map(ToString::to_string)
         .collect();
 
+    // Everything local first, and out before the vault is contacted: the
+    // own recipient line is what the user is copying to another device's
+    // `enroll`, and it must not wait on a network that may be down or an
+    // ssh prompt — nor on the lock a push in another terminal holds.
     let mut text = String::new();
     text.push_str(&format!("vault:      {label}\n"));
     text.push_str(&format!(
@@ -362,8 +366,7 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
     // recovery checks ask a human to compare the vault id, and the rollback
     // story asks them to compare the counter — neither is actionable without
     // a reference value to compare AGAINST, which is what this prints. Read
-    // straight from the pin file: no network, no identity, no lock, so `info`
-    // still works on a vault this device cannot currently reach.
+    // straight from the pin file: no network, no lock.
     let pins = PinStore::new(&vaultrepo::sealed_root(&settings.git_dir));
     match pins.load_for_url(&url) {
         Ok(Some(pin)) => {
@@ -409,21 +412,20 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
         Ok(None) => text.push_str("vault id:   (not yet seen from this repository)\n"),
         Err(e) => text.push_str(&format!("vault id:   (pin unreadable: {e})\n")),
     }
+    emit(out, &text)?;
+
     // §5: the recipient set is whatever the vault's manifest declares —
-    // read from the vault (steps 1–4 only: nothing is applied or pinned).
-    // A vault this device cannot reach right now still gets the rest.
+    // read from the vault (steps 1–4 only: nothing is applied or pinned),
+    // which takes the repository lock and contacts the remote. A vault this
+    // device cannot reach right now still got everything above.
+    let mut text = String::new();
     match declared_recipients(&settings, &url) {
         Ok(Some(set)) if set.is_empty() => text.push_str(
             "recipients: not recorded in this vault yet (run `git-remote-sealed upgrade`)\n",
         ),
         Ok(Some(set)) => {
             for r in &set {
-                let mark = if own.contains(r) {
-                    " (this device)"
-                } else {
-                    ""
-                };
-                text.push_str(&format!("recipients: {r}{mark}\n"));
+                text.push_str(&format!("recipients: {}\n", marked(r, &own)));
             }
         }
         Ok(None) => text.push_str(
@@ -436,8 +438,24 @@ fn info(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
          \x20           then clone there. Keys never move between devices; the new device's\n\
          \x20           own `git-remote-sealed info` shows the key to enroll.\n",
     );
+    emit(out, &text)
+}
+
+/// Write and flush: `info` prints in two halves, and the first must reach
+/// the terminal before the second blocks on the lock or the network.
+fn emit(out: &mut dyn Write, text: &str) -> Result<(), CliError> {
     out.write_all(text.as_bytes())
+        .and_then(|()| out.flush())
         .map_err(|e| CliError::Io(e.to_string()))
+}
+
+/// A recipient, marked when it is one of this device's own.
+fn marked(recipient: &str, own: &BTreeSet<String>) -> String {
+    if own.contains(recipient) {
+        format!("{recipient} (this device)")
+    } else {
+        recipient.to_owned()
+    }
 }
 
 /// The recipient set the vault's manifest declares (`None` = empty vault).
@@ -487,34 +505,24 @@ fn change_set(
     let own: BTreeSet<String> = cfg.own_recipients.iter().map(ToString::to_string).collect();
     let listing = |set: &BTreeSet<String>| -> String {
         set.iter()
-            .map(|r| {
-                let mark = if own.contains(r) {
-                    " (this device)"
-                } else {
-                    ""
-                };
-                format!("    {r}{mark}\n")
-            })
+            .map(|r| format!("    {}\n", marked(r, &own)))
             .collect()
     };
     let text = match (&change, outcome) {
-        (SetChange::Enroll(key), Compaction::NothingToDo { recipients }) => format!(
-            "{key} is already a recipient of {label}; nothing to do.\nrecipients ({}):\n{}",
-            recipients.len(),
-            listing(&recipients)
-        ),
-        (SetChange::Revoke { key, .. }, Compaction::NothingToDo { recipients }) => format!(
-            "{key} is not a recipient of {label}; nothing to do.\nrecipients ({}):\n{}",
-            recipients.len(),
-            listing(&recipients)
-        ),
-        (SetChange::Upgrade { .. }, Compaction::NothingToDo { recipients }) => format!(
-            "{label} already records {} recipients; nothing to do.\nrecipients:\n{}",
-            recipients.len(),
-            listing(&recipients)
-        ),
-        (SetChange::Keep { .. }, Compaction::NothingToDo { .. }) => {
-            unreachable!("Keep always compacts")
+        (change, Compaction::NothingToDo { recipients }) => {
+            let why = match change {
+                SetChange::Enroll(key) => format!("{key} is already a recipient of {label}"),
+                SetChange::Revoke { key, .. } => format!("{key} is not a recipient of {label}"),
+                SetChange::Upgrade { .. } => {
+                    format!("{label} already records {} recipients", recipients.len())
+                }
+                SetChange::Keep { .. } => unreachable!("Keep always compacts"),
+            };
+            format!(
+                "{why}; nothing to do.\nrecipients ({}):\n{}",
+                recipients.len(),
+                listing(&recipients)
+            )
         }
         (change, Compaction::Done(report)) => {
             let what = match change {
