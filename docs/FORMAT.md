@@ -265,16 +265,30 @@ Decryption requires a corresponding **identity** (secret key). This version
 defines **no write-only algorithm**: §8 requires reading the manifest, and
 that needs an identity. [5a]
 
-**Declared vs. actual.** When every `recipient` line is an X25519
-recipient, the number of X25519 recipient stanzas in the manifest
-ciphertext's age header MUST equal the number of `recipient` lines.
-Readers MUST check this after decrypting the manifest (§6 step 3) and
-treat a mismatch as INVALID: fewer stanzas means a declared recipient
-cannot read, more means an undeclared key can — either way a buggy or
-misconfigured writer. The host cannot forge the manifest, so this
-check reports no attack, only a writer to fix. Readers MAY apply the
-same check to bundles. With non-X25519 recipients present the counts
-are not comparable and the check does not apply.
+**Declared vs. actual.** Every `recipient` line has a type (X25519, or
+whatever a plugin defines), and every recipient stanza in an age
+header has a tag (`X25519`, or the plugin's). When an implementation
+recognizes the type of every `recipient` line, the recipient stanzas
+of the manifest ciphertext's age header, counted by tag, MUST equal
+what the lines call for: as many X25519 stanzas as X25519 lines, and
+so on per type — so a stanza of a type no line declares is a mismatch
+too. Readers MUST check this after the manifest has passed the
+trust-on-first-use checks (§6 step 3; §7.4 first, so that a
+rolled-back or substituted vault is reported as such) and treat a
+mismatch as INVALID: fewer stanzas means a declared recipient cannot
+read, more — or a stanza of an undeclared type — means an undeclared
+key can; either way a buggy or misconfigured writer. The host cannot
+forge the manifest, so this check reports no attack, only a writer to
+fix. Readers MAY apply the same check to bundles. When a `recipient`
+line is of a type the implementation cannot recognize, the counts are
+not comparable and the check does not apply.
+
+A mismatched manifest still decrypts for its real recipients, so the
+vault can be repaired: an implementation MAY offer a **repair**, which
+is a compaction (§9) that reads through the mismatch and rewrites the
+vault encrypted to the set the manifest declares, changing nothing
+else about the set. A repair MUST be an explicit operation, never what
+a reader does with a mismatch by default.
 
 Counting stanzas needs one care: age writes random **grease** stanzas
 into some headers on purpose, and a grease stanza is not a recipient.
@@ -315,7 +329,7 @@ Background: [design notes for §5](DESIGN-NOTES.md#section-5).
    race), recreates the mirror in the other format once.
 2. Check `sealed-format` (§3).
 3. Decrypt and validate the manifest (§7), including the
-   trust-on-first-use checks (§7.4) and the declared-vs-actual
+   trust-on-first-use checks (§7.4) and then the declared-vs-actual
    recipient check (§5). Bundles present with no manifest is a hard
    error (§3).
 4. Verify the tree against the manifest: the set of grammar-matching

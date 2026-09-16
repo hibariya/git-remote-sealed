@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+Fixes from a review of 0.3.0.
+
+The declared-vs-actual recipient check:
+
+- A vault whose manifest declares a different set than it is encrypted
+  to can be repaired: `git-remote-sealed compact --repair` rewrites it
+  encrypted to the declared set. Before, every command refused such a
+  vault, including the ones the error told you to run.
+- The check now compares recipient stanzas by type. A stanza of a type
+  no `recipient` line declares (a plugin key) is a mismatch; before,
+  only the X25519 count was compared and an extra plugin stanza passed.
+- The check runs after the rollback and vault-identity checks, so a
+  replayed generation is reported as a rollback, not as a writer bug.
+
+Command-line: a flag a command does not take (`info --yes`,
+`compact --yes`) is a usage error again.
+
 ## 0.3.0 — recipients are recorded in the vault
 
 The set of keys a vault is encrypted to now lives inside the encrypted

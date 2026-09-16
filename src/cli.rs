@@ -18,7 +18,8 @@
 //!   bound to the same vault (the pin is shared per vault, §7.4). Without
 //!   `--yes` it prints the warning (forgetting under attack accepts the
 //!   attack) and refuses;
-//! - `compact [<remote-or-url>]` — §9.
+//! - `compact [--repair] [<remote-or-url>]` — §9; `--repair` reads through
+//!   a §5 declared-vs-actual mismatch so the rewrite fixes it.
 //!
 //! A remote is named by its git remote name (resolved with `git remote
 //! get-url`) or given as a `sealed::<url>` URL. With no argument, the one
@@ -51,6 +52,9 @@ pub enum Command {
         remote: Option<String>,
     },
     Compact {
+        /// §5 repair: read through a declared-vs-actual mismatch and
+        /// rewrite the vault encrypted to the declared set.
+        repair: bool,
         remote: Option<String>,
     },
     Enroll {
@@ -157,7 +161,7 @@ pub const USAGE: &str = "usage: git-remote-sealed <remote> <url>            (inv
        git-remote-sealed enroll <age1...> [<remote-or-url>]\n\
        git-remote-sealed revoke [--yes] <age1...> [<remote-or-url>]\n\
        git-remote-sealed upgrade [--yes] [<remote-or-url>]\n\
-       git-remote-sealed compact [<remote-or-url>]\n\
+       git-remote-sealed compact [--repair] [<remote-or-url>]\n\
        git-remote-sealed forget --yes [<remote-or-url>]\n\
        git-remote-sealed --version | --help\n\
 \n\
@@ -169,6 +173,8 @@ pub const USAGE: &str = "usage: git-remote-sealed <remote> <url>            (inv
             match the number of keys the vault is encrypted to (--yes when\n\
             that number cannot be determined)\n\
   compact   rewrite the vault as one snapshot; deleted history leaves the host\n\
+            (--repair: also when the vault is encrypted to a different set\n\
+            than its manifest declares, which every other command refuses)\n\
   forget    discard this repository's memory of the vault (read the warning)\n\
 \n\
   The identity comes from SEALED_IDENTITY or `git config sealed.identity`.\n\
@@ -181,28 +187,29 @@ pub const USAGE: &str = "usage: git-remote-sealed <remote> <url>            (inv
 pub fn parse_args(args: &[String]) -> Option<Result<Command, CliError>> {
     let (name, rest) = args.split_first()?;
     let cmd = match name.as_str() {
-        "info" => positional(rest, 0, 1).map(|(_, p)| Command::Info {
-            remote: p.into_iter().next(),
+        "info" => positional(rest, 0, 1, &[]).map(|p| Command::Info {
+            remote: p.remote(0),
         }),
-        "forget" => positional(rest, 0, 1).map(|(yes, p)| Command::Forget {
-            yes,
-            remote: p.into_iter().next(),
+        "forget" => positional(rest, 0, 1, &[YES]).map(|p| Command::Forget {
+            yes: p.has(YES),
+            remote: p.remote(0),
         }),
-        "compact" => positional(rest, 0, 1).map(|(_, p)| Command::Compact {
-            remote: p.into_iter().next(),
+        "compact" => positional(rest, 0, 1, &[REPAIR]).map(|p| Command::Compact {
+            repair: p.has(REPAIR),
+            remote: p.remote(0),
         }),
-        "enroll" => positional(rest, 1, 2).map(|(_, mut p)| Command::Enroll {
-            key: p.remove(0),
-            remote: p.into_iter().next(),
+        "enroll" => positional(rest, 1, 2, &[]).map(|p| Command::Enroll {
+            key: p.args[0].clone(),
+            remote: p.remote(1),
         }),
-        "revoke" => positional(rest, 1, 2).map(|(yes, mut p)| Command::Revoke {
-            key: p.remove(0),
-            yes,
-            remote: p.into_iter().next(),
+        "revoke" => positional(rest, 1, 2, &[YES]).map(|p| Command::Revoke {
+            key: p.args[0].clone(),
+            yes: p.has(YES),
+            remote: p.remote(1),
         }),
-        "upgrade" => positional(rest, 0, 1).map(|(yes, p)| Command::Upgrade {
-            yes,
-            remote: p.into_iter().next(),
+        "upgrade" => positional(rest, 0, 1, &[YES]).map(|p| Command::Upgrade {
+            yes: p.has(YES),
+            remote: p.remote(0),
         }),
         // Before the `<remote> <url>` fallthrough: git never invokes a
         // remote helper with these, and a vault URL cannot look like one.
@@ -213,31 +220,56 @@ pub fn parse_args(args: &[String]) -> Option<Result<Command, CliError>> {
     Some(cmd)
 }
 
-/// `--yes` anywhere, plus `min..=max` positional arguments; anything else
-/// is a usage error.
-fn positional(rest: &[String], min: usize, max: usize) -> Result<(bool, Vec<String>), CliError> {
-    let mut yes = false;
-    let mut args = Vec::new();
+const YES: &str = "--yes";
+const REPAIR: &str = "--repair";
+
+/// A verb's parsed arguments: the flags seen and the positional ones.
+struct Parsed {
+    flags: BTreeSet<String>,
+    args: Vec<String>,
+}
+
+impl Parsed {
+    fn has(&self, flag: &str) -> bool {
+        self.flags.contains(flag)
+    }
+
+    /// The optional remote: the positional argument at `index`.
+    fn remote(&self, index: usize) -> Option<String> {
+        self.args.get(index).cloned()
+    }
+}
+
+/// The verb's `flags` anywhere, plus `min..=max` positional arguments;
+/// anything else — a flag the verb does not take included — is a usage
+/// error, so that `info --yes` is refused rather than silently obeyed.
+fn positional(rest: &[String], min: usize, max: usize, flags: &[&str]) -> Result<Parsed, CliError> {
+    let mut parsed = Parsed {
+        flags: BTreeSet::new(),
+        args: Vec::new(),
+    };
     for a in rest {
-        if a == "--yes" {
-            yes = true;
+        if flags.contains(&a.as_str()) {
+            parsed.flags.insert(a.clone());
         } else if a.starts_with('-') {
             return Err(CliError::Usage(USAGE.into()));
         } else {
-            args.push(a.clone());
+            parsed.args.push(a.clone());
         }
     }
-    if args.len() < min || args.len() > max {
+    if parsed.args.len() < min || parsed.args.len() > max {
         return Err(CliError::Usage(USAGE.into()));
     }
-    Ok((yes, args))
+    Ok(parsed)
 }
 
 pub fn run(cmd: Command, out: &mut dyn Write) -> Result<(), CliError> {
     match cmd {
         Command::Info { remote } => info(remote.as_deref(), out),
         Command::Forget { yes, remote } => forget(yes, remote.as_deref(), out),
-        Command::Compact { remote } => run_compact(remote.as_deref(), out),
+        Command::Compact { repair, remote } => {
+            change_set(remote.as_deref(), SetChange::Keep { repair }, out)
+        }
         Command::Enroll { key, remote } => {
             let key = parse_recipient(&key)?;
             change_set(remote.as_deref(), SetChange::Enroll(key), out)
@@ -427,9 +459,10 @@ fn parse_recipient(token: &str) -> Result<Recipient, CliError> {
     })
 }
 
-/// `enroll`, `revoke`, `upgrade`: a compaction with a changed set (§9.1,
-/// §9.2), reported with the recorded keys in full — they are what the
-/// other devices must be able to see in `info`.
+/// `compact`, `enroll`, `revoke`, `upgrade`: a compaction (§9), with the
+/// set changed per `change` (§9.1, §9.2), reported with the recorded keys
+/// in full — they are what the other devices must be able to see in
+/// `info`.
 fn change_set(
     remote: Option<&str>,
     change: SetChange,
@@ -475,7 +508,9 @@ fn change_set(
             recipients.len(),
             listing(&recipients)
         ),
-        (SetChange::Keep, Compaction::NothingToDo { .. }) => unreachable!("Keep always compacts"),
+        (SetChange::Keep { .. }, Compaction::NothingToDo { .. }) => {
+            unreachable!("Keep always compacts")
+        }
         (change, Compaction::Done(report)) => {
             let what = match change {
                 SetChange::Enroll(key) => format!("enrolled {key} in {label}"),
@@ -487,7 +522,12 @@ fn change_set(
                 SetChange::Upgrade { .. } => {
                     format!("upgraded {label}: its manifest now records its recipients")
                 }
-                SetChange::Keep => unreachable!("compact has its own report"),
+                SetChange::Keep { .. } => match &report.repaired {
+                    Some(m) => format!(
+                        "compacted and repaired {label}: {m}, so every file is now re-encrypted to the declared set"
+                    ),
+                    None => format!("compacted {label}"),
+                },
             };
             let how = match report.allocated {
                 Some(seq) => format!("one -full bundle at sequence {seq}"),
@@ -552,36 +592,6 @@ fn forget(yes: bool, remote: Option<&str>, out: &mut dyn Write) -> Result<(), Cl
             out,
             "forgot the mirror for {label} ({}); this repository held no pin for it.",
             state.display()
-        ),
-    }
-    .map_err(|e| CliError::Io(e.to_string()))
-}
-
-fn run_compact(remote: Option<&str>, out: &mut dyn Write) -> Result<(), CliError> {
-    let settings = Settings::load()?;
-    let (label, url) = resolve_remote(&settings.git_dir, remote)?;
-    let vault = VaultRepo::open(&settings.git_dir, &url)?;
-    let cfg = settings.writer_config();
-    let report = match compact::compact(
-        &vault,
-        &settings.git_dir,
-        &settings.identities,
-        &cfg,
-        &compact::SetChange::Keep,
-    )? {
-        compact::Compaction::Done(report) => report,
-        compact::Compaction::NothingToDo { .. } => unreachable!("Keep always compacts"),
-    };
-    match report.allocated {
-        Some(seq) => writeln!(
-            out,
-            "compacted {label}: one -full bundle at sequence {seq}, counter {} (attempt {})",
-            report.counter, report.attempts
-        ),
-        None => writeln!(
-            out,
-            "compacted {label}: zero refs, manifest-only generation, counter {} (attempt {})",
-            report.counter, report.attempts
         ),
     }
     .map_err(|e| CliError::Io(e.to_string()))
@@ -655,7 +665,15 @@ mod tests {
         assert_eq!(
             parse_args(&args(&["compact", "sealed::/v"])).map(Result::ok),
             Some(Some(Command::Compact {
+                repair: false,
                 remote: Some("sealed::/v".into())
+            }))
+        );
+        assert_eq!(
+            parse_args(&args(&["compact", "--repair"])).map(Result::ok),
+            Some(Some(Command::Compact {
+                repair: true,
+                remote: None
             }))
         );
         assert!(matches!(
@@ -666,6 +684,21 @@ mod tests {
             parse_args(&args(&["forget", "--no"])),
             Some(Err(CliError::Usage(_)))
         ));
+        // A flag a verb does not take is a usage error, not silently
+        // accepted: USAGE lists these verbs without it.
+        for a in [
+            &["info", "--yes"][..],
+            &["compact", "--yes"],
+            &["enroll", "age1x", "--yes"],
+            &["upgrade", "--repair"],
+            &["revoke", "age1x", "--repair"],
+            &["forget", "--repair"],
+        ] {
+            assert!(
+                matches!(parse_args(&args(a)), Some(Err(CliError::Usage(_)))),
+                "{a:?}"
+            );
+        }
     }
 
     #[test]

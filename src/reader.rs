@@ -83,15 +83,50 @@ pub enum ReadError {
         refname: String,
         sha: String,
     },
-    /// §5 declared vs. actual: every `recipient` line is X25519, and the
-    /// manifest ciphertext's X25519 stanza count differs from the number of
-    /// lines. The host cannot forge the manifest, so this is a writer bug,
-    /// never an attack.
-    RecipientCountMismatch {
-        declared: usize,
-        stanzas: usize,
-    },
+    /// §5 declared vs. actual: the manifest ciphertext's recipient stanzas
+    /// do not match its `recipient` lines. The host cannot forge the
+    /// manifest, so this is a writer bug, never an attack.
+    RecipientCountMismatch(RecipientMismatch),
     Io(String),
+}
+
+/// §5: what a manifest declares against what its ciphertext is encrypted
+/// to, when the two disagree. Recoverable: the manifest still decrypts
+/// for its real recipients, so `git-remote-sealed compact --repair`
+/// rewrites the vault encrypted to the declared set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientMismatch {
+    /// The number of `recipient` lines (every one of a recognized type).
+    pub declared: usize,
+    /// The ciphertext's recipient stanzas, by type.
+    pub stanzas: HeaderStanzas,
+}
+
+impl RecipientMismatch {
+    /// Who is wronged: fewer stanzas than lines means a declared recipient
+    /// cannot read; more, or a stanza of a type no line declares, means an
+    /// undeclared key can.
+    pub fn consequence(&self) -> &'static str {
+        match self.stanzas.total().cmp(&self.declared) {
+            std::cmp::Ordering::Less => "a declared recipient cannot read it",
+            std::cmp::Ordering::Greater => "an undeclared key can read it",
+            std::cmp::Ordering::Equal => {
+                "a declared recipient cannot read it and an undeclared key can"
+            }
+        }
+    }
+}
+
+impl fmt::Display for RecipientMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the manifest declares {} recipient(s) but its ciphertext is encrypted to {}: {}",
+            self.declared,
+            self.stanzas,
+            self.consequence()
+        )
+    }
 }
 
 impl fmt::Display for ReadError {
@@ -134,16 +169,11 @@ impl fmt::Display for ReadError {
                 f,
                 "object {sha} for {refname} is still missing after applying every bundle: corrupt or incomplete vault"
             ),
-            ReadError::RecipientCountMismatch { declared, stanzas } => write!(
+            ReadError::RecipientCountMismatch(m) => write!(
                 f,
-                "the manifest declares {declared} recipient(s) but its ciphertext is encrypted to {stanzas} X25519 key(s): \
-                 {}. This is not an attack — the host cannot forge the manifest — but a buggy or misconfigured writer; \
-                 fix that device, then repair the set with `git-remote-sealed enroll`/`revoke` from a device that can read the vault",
-                if stanzas < declared {
-                    "a declared recipient cannot read it"
-                } else {
-                    "an undeclared key can read it"
-                }
+                "{m}. This is not an attack — the host cannot forge the manifest — but a buggy or misconfigured writer; \
+                 fix that device, then run `git-remote-sealed compact --repair` from a device that can read the vault: \
+                 it rewrites every file encrypted to the declared set"
             ),
             ReadError::Io(e) => write!(f, "reader I/O error: {e}"),
         }
@@ -190,6 +220,9 @@ pub struct Prepared {
     /// The manifest ciphertext's recipient stanzas by type (§5), for the
     /// writer's pre-recipient diagnostics and the §9.2 upgrade check.
     manifest_stanzas: Option<HeaderStanzas>,
+    /// §5: the declared-vs-actual mismatch a repair read tolerated
+    /// (`inspect_with(.., repair = true)`); `None` on every other read.
+    recipient_mismatch: Option<RecipientMismatch>,
     writer_must_be_read_only: bool,
     prev_pin: Option<pinstore::Pin>,
     next_pin: pinstore::Pin,
@@ -212,8 +245,15 @@ impl Prepared {
 
     /// The manifest ciphertext's recipient stanzas by type (§5); `None`
     /// when the header could not be read (never on a decrypted manifest).
-    pub fn manifest_stanzas(&self) -> Option<HeaderStanzas> {
-        self.manifest_stanzas
+    pub fn manifest_stanzas(&self) -> Option<&HeaderStanzas> {
+        self.manifest_stanzas.as_ref()
+    }
+
+    /// §5: the mismatch this read tolerated because it was asked to repair
+    /// it (`inspect_with`); `None` when declared and actual agree, or on a
+    /// read that would have refused a mismatch.
+    pub fn recipient_mismatch(&self) -> Option<&RecipientMismatch> {
+        self.recipient_mismatch.as_ref()
     }
 
     /// §7.3: the manifest carried a line type this implementation does not
@@ -265,6 +305,19 @@ impl Inspection {
 /// file set. Touches no objects in the caller's repository — the remote
 /// helper answers `list` from this alone.
 pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection, ReadError> {
+    inspect_with(vault, identities, false)
+}
+
+/// `inspect`, with the §5 declared-vs-actual mismatch either refused
+/// (`repair = false`, every ordinary read) or recorded on the `Prepared`
+/// for the explicit repair compaction (`repair = true`) that rewrites the
+/// vault encrypted to the declared set. The manifest still decrypts for
+/// its real recipients, which is what makes the repair possible.
+pub fn inspect_with(
+    vault: &VaultRepo,
+    identities: &[Identity],
+    repair: bool,
+) -> Result<Inspection, ReadError> {
     // §6.1: current committed tree (the mirror was reset, not merged).
     let tree = vault.fetch()?;
     // §7.4: the vault this URL is bound to (None = nothing was ever pinned
@@ -322,16 +375,14 @@ pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection,
     let manifest_plain = crypt::decrypt(identities, &manifest_cipher)?;
     let parsed = manifest::parse(&manifest_plain)?;
     let manifest = parsed.manifest;
-    // §5 declared vs. actual, right after the manifest is validated.
-    let manifest_stanzas = crypt::header_stanzas(&manifest_cipher);
-    check_declared_recipients(&manifest, manifest_stanzas)?;
     // §3: "readers MUST fail if the two disagree" — implied here: the hint
     // passed check_hint (== FORMAT_VERSION) and manifest::parse accepts
     // `format 2` only, so hint == manifest format on every success path.
 
-    // §7.4 vault identity, first: a URL bound to a vault must keep serving
-    // that vault. This runs BEFORE any pin is looked up by the manifest's
-    // own identity, or a substituted vault would simply meet a fresh pin.
+    // §7.4 vault identity, before anything else about the manifest: a URL
+    // bound to a vault must keep serving that vault. This runs BEFORE any
+    // pin is looked up by the manifest's own identity, or a substituted
+    // vault would simply meet a fresh pin.
     if let Some(expected) = &expected_vault {
         if *expected != manifest.vault_id {
             return Err(PinError::VaultMismatch {
@@ -354,6 +405,17 @@ pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection,
     let next_pin =
         pinstore::validate_and_advance(prev_pin.as_ref(), &manifest, &manifest_cipher_digest)?;
 
+    // §5 declared vs. actual, AFTER the §7.4 battery: a rolled-back or
+    // substituted generation that also happens to mismatch is reported as
+    // the attack §7.4 names, not as the writer bug this check names (its
+    // error says "not an attack", and would be wrong there).
+    let manifest_stanzas = crypt::header_stanzas(&manifest_cipher);
+    let recipient_mismatch = match check_declared_recipients(&manifest, manifest_stanzas.as_ref()) {
+        Ok(()) => None,
+        Err(mismatch) if repair => Some(mismatch),
+        Err(mismatch) => return Err(ReadError::RecipientCountMismatch(mismatch)),
+    };
+
     // §6.4/§6.7: the grammar-matching tree files must equal the expected
     // file set exactly.
     manifest.check_tree_files(tree.files.keys().map(String::as_str))?;
@@ -363,6 +425,7 @@ pub fn inspect(vault: &VaultRepo, identities: &[Identity]) -> Result<Inspection,
         manifest,
         manifest_cipher_digest,
         manifest_stanzas,
+        recipient_mismatch,
         writer_must_be_read_only: parsed.writer_must_be_read_only,
         prev_pin,
         next_pin,
@@ -475,40 +538,33 @@ fn empty_outcome() -> ReadOutcome {
     }
 }
 
-/// §5 declared vs. actual: when every `recipient` line is an X25519
-/// recipient, the X25519 stanza count of the manifest ciphertext MUST equal
-/// the number of lines. A pre-recipient manifest declares nothing, and a
-/// set with a non-X25519 member makes the counts incomparable — the check
-/// does not apply to either.
+/// §5 declared vs. actual: when this implementation recognizes the type of
+/// every `recipient` line, the manifest ciphertext's recipient stanzas,
+/// counted by type, MUST equal what the lines call for — as many X25519
+/// stanzas as X25519 lines, and no stanza of a type no line declares. A
+/// pre-recipient manifest declares nothing, and a line of a type this
+/// implementation cannot classify makes the counts incomparable — the
+/// check does not apply to either.
 pub fn check_declared_recipients(
     m: &Manifest,
-    stanzas: Option<HeaderStanzas>,
-) -> Result<(), ReadError> {
-    if m.is_pre_recipient() || !all_x25519(&m.recipients) {
+    stanzas: Option<&HeaderStanzas>,
+) -> Result<(), RecipientMismatch> {
+    if m.is_pre_recipient() {
         return Ok(());
     }
+    let Some(declared) = crypt::declared_stanzas(&m.recipients) else {
+        return Ok(()); // a recipient type we cannot classify: not comparable
+    };
     let Some(stanzas) = stanzas else {
         return Ok(()); // unreadable header: nothing to compare (the file decrypted)
     };
-    if stanzas.x25519 != m.recipients.len() {
-        return Err(ReadError::RecipientCountMismatch {
+    if *stanzas != declared {
+        return Err(RecipientMismatch {
             declared: m.recipients.len(),
-            stanzas: stanzas.x25519,
+            stanzas: stanzas.clone(),
         });
     }
     Ok(())
-}
-
-/// Whether every recipient string is an X25519 recipient (the only type
-/// this implementation can tell apart, and encrypt to).
-pub fn all_x25519<'a, I>(recipients: I) -> bool
-where
-    I: IntoIterator<Item = &'a String>,
-{
-    use std::str::FromStr;
-    recipients
-        .into_iter()
-        .all(|r| age::x25519::Recipient::from_str(r).is_ok())
 }
 
 /// §6.2/§3: `sealed-format` must exist, spell a canonical ASCII decimal
@@ -649,9 +705,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn declared_vs_actual_applies_only_to_all_x25519_sets() {
-        // §5: fewer stanzas than lines, or more, is INVALID; a pre-recipient
-        // manifest and a set with a non-X25519 member are outside the check.
+    fn declared_vs_actual_compares_stanzas_by_type() {
+        // §5: fewer stanzas than lines, or more, is INVALID — and so is a
+        // stanza of a type no line declares; a pre-recipient manifest and a
+        // set with a member of an unrecognized type are outside the check.
         use age::x25519::Identity;
         let ids: Vec<Identity> = (0..3).map(|_| Identity::generate()).collect();
         let text = format!(
@@ -665,27 +722,48 @@ mod tests {
             let rcpts: Vec<_> = ids[..n].iter().map(Identity::to_public).collect();
             crypt::header_stanzas(&crypt::encrypt(&rcpts, text.as_bytes()).expect("encrypt"))
         };
-        check_declared_recipients(&m, stanzas(2)).expect("2 declared, 2 stanzas");
-        assert!(matches!(
-            check_declared_recipients(&m, stanzas(3)),
-            Err(ReadError::RecipientCountMismatch {
-                declared: 2,
-                stanzas: 3
-            })
-        ));
-        assert!(matches!(
-            check_declared_recipients(&m, stanzas(1)),
-            Err(ReadError::RecipientCountMismatch {
-                declared: 2,
-                stanzas: 1
-            })
-        ));
+        let outcome = |s: Option<HeaderStanzas>| {
+            check_declared_recipients(&m, s.as_ref()).map_err(|e| (e.declared, e.stanzas.total()))
+        };
+        assert_eq!(outcome(stanzas(2)), Ok(()));
+        let more = check_declared_recipients(&m, stanzas(3).as_ref()).expect_err("3 stanzas");
+        assert_eq!((more.declared, more.stanzas.x25519()), (2, 3));
+        assert_eq!(more.consequence(), "an undeclared key can read it");
+        let fewer = check_declared_recipients(&m, stanzas(1).as_ref()).expect_err("1 stanza");
+        assert_eq!((fewer.declared, fewer.stanzas.x25519()), (2, 1));
+        assert_eq!(fewer.consequence(), "a declared recipient cannot read it");
+        assert_eq!(outcome(None), Ok(()), "unreadable header: no check");
+
+        // Two X25519 stanzas plus a plugin stanza, two X25519 lines: the
+        // X25519 count matches, and the plugin key can still read it.
+        let mixed: &[u8] = b"age-encryption.org/v1\n-> X25519 aaaa\nbbbb\n-> X25519 cccc\ndddd\n-> piv-p256 eeee\nffff\n--- mac\n";
+        let extra = check_declared_recipients(&m, crypt::header_stanzas(mixed).as_ref())
+            .expect_err("an undeclared plugin stanza");
+        assert_eq!((extra.declared, extra.stanzas.total()), (2, 3));
+        assert_eq!(extra.consequence(), "an undeclared key can read it");
+        assert!(
+            extra.to_string().contains(
+                "encrypted to 2 X25519 key(s) and 1 other recipient stanza(s) (piv-p256)"
+            ),
+            "{extra}"
+        );
+        // One X25519 stanza plus a plugin stanza: same total, wrong types.
+        let swapped: &[u8] =
+            b"age-encryption.org/v1\n-> X25519 aaaa\nbbbb\n-> piv-p256 eeee\nffff\n--- mac\n";
+        let e = check_declared_recipients(&m, crypt::header_stanzas(swapped).as_ref())
+            .expect_err("a plugin stanza in place of an X25519 one");
+        assert_eq!(
+            e.consequence(),
+            "a declared recipient cannot read it and an undeclared key can"
+        );
+
         let mut pre = m.clone();
         pre.recipients.clear();
-        check_declared_recipients(&pre, stanzas(3)).expect("pre-recipient: no check");
+        check_declared_recipients(&pre, stanzas(3).as_ref()).expect("pre-recipient: no check");
         let mut plugin = m.clone();
         plugin.recipients.insert("age1yubikey1qwerty".into());
-        check_declared_recipients(&plugin, stanzas(1)).expect("non-X25519 member: no check");
+        check_declared_recipients(&plugin, stanzas(1).as_ref())
+            .expect("a member of an unrecognized type: no check");
     }
 
     #[test]

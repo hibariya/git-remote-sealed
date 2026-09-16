@@ -36,7 +36,7 @@ use crate::bundling::{self, BundleSpec, Stored};
 use crate::manifest::{BundleRecord, Manifest, MAX_COUNTER};
 use crate::names::{BundleName, MAX_SEQ};
 use crate::pinstore;
-use crate::reader::{self, Inspection, Prepared};
+use crate::reader::{self, Inspection, Prepared, RecipientMismatch};
 use crate::vaultrepo::{PushOutcome, VaultRepo};
 use crate::writer::{
     self, advanced_pin, build_commit, preserved_entries, WriteError, WriterConfig, MAX_ATTEMPTS,
@@ -53,13 +53,19 @@ pub struct CompactReport {
     pub attempts: usize,
     /// The recipient set the new generation declares and is encrypted to.
     pub recipients: BTreeSet<String>,
+    /// §5: the mismatch the generation this one replaced had, when this
+    /// was a `SetChange::Keep { repair: true }` that found one.
+    pub repaired: Option<RecipientMismatch>,
 }
 
 /// What a compaction does to the recipient set.
 #[derive(Debug, Clone)]
 pub enum SetChange {
-    /// Plain §9: the manifest's set, unchanged.
-    Keep,
+    /// Plain §9: the manifest's set, unchanged. `repair` reads through a
+    /// §5 declared-vs-actual mismatch (`reader::inspect_with`) so that the
+    /// rewrite — encrypted to the declared set, like any compaction — is
+    /// what fixes it.
+    Keep { repair: bool },
     /// §9.1: set ∪ {key}.
     Enroll(Recipient),
     /// §9.1: set \ {key}; removing one of this device's own recipients
@@ -93,9 +99,10 @@ pub fn compact(
     let local_format = writer::preflight(source_git_dir)?;
     let mut last = String::new();
     let mut unreported = 0usize;
+    let repair = matches!(change, SetChange::Keep { repair: true });
     for attempt in 1..=MAX_ATTEMPTS {
         // §9.1: fetch, record the tip T, validate and apply as in §6.
-        let p = match reader::inspect(vault, identities)? {
+        let p = match reader::inspect_with(vault, identities, repair)? {
             Inspection::Empty => return Err(WriteError::EmptyVault),
             Inspection::Vault(p) => p,
         };
@@ -226,6 +233,7 @@ pub fn compact(
                     allocated,
                     attempts: attempt,
                     recipients: declared,
+                    repaired: p.recipient_mismatch().cloned(),
                 }));
             }
             PushOutcome::Rejected(summary) => {
@@ -278,11 +286,11 @@ fn new_set(
         match p.manifest_stanzas() {
             // The count can be determined: it MUST equal the set's size,
             // smaller and larger alike.
-            Some(h) if h.other == 0 => {
-                if set.len() != h.x25519 {
+            Some(h) if h.other() == 0 => {
+                if set.len() != h.x25519() {
                     return Err(WriteError::UpgradeCountMismatch {
                         would_record,
-                        stanzas: h.x25519,
+                        stanzas: h.x25519(),
                     });
                 }
             }
@@ -291,7 +299,7 @@ fn new_set(
             Some(h) if !*yes => {
                 return Err(WriteError::UpgradeCountUnknown {
                     would_record,
-                    stanzas: h,
+                    stanzas: h.clone(),
                 });
             }
             // No readable header at all. Impossible for a manifest that
@@ -300,10 +308,7 @@ fn new_set(
             None if !*yes => {
                 return Err(WriteError::UpgradeCountUnknown {
                     would_record,
-                    stanzas: crate::crypt::HeaderStanzas {
-                        x25519: 0,
-                        other: 0,
-                    },
+                    stanzas: crate::crypt::HeaderStanzas::default(),
                 });
             }
             _ => {}
@@ -316,7 +321,7 @@ fn new_set(
     let current = writer::writable_set(p, cfg)?;
     let mut set: BTreeSet<String> = m.recipients.clone();
     match change {
-        SetChange::Keep => {}
+        SetChange::Keep { .. } => {}
         SetChange::Enroll(key) => {
             if !set.insert(key.to_string()) {
                 return Ok(None);

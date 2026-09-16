@@ -2,6 +2,7 @@
 //! encrypted to the vault's recipient set. X25519 recipients are the
 //! baseline; this skeleton implements only those.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read, Write};
 
@@ -69,17 +70,92 @@ pub fn encrypt_stream<R: Read, W: Write>(
     Ok((n, output))
 }
 
+/// The stanza tag of an X25519 recipient (`-> X25519 ...`).
+pub const X25519_TAG: &str = "X25519";
+
 /// What an age header's recipient stanzas say about who can open the
-/// file. The header is plaintext by design (that is what lets a recipient
-/// find its own stanza), so this needs no identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// file: one count per stanza type (the tag after `-> `), grease excluded
+/// (see `header_stanzas`). The header is plaintext by design (that is
+/// what lets a recipient find its own stanza), so this needs no identity.
+///
+/// Counting by type rather than "X25519 vs. the rest" is what lets the §5
+/// check reject a stanza of a type nobody declared, and what a future
+/// recipient type (post-quantum) plugs into: one more recognized tag.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeaderStanzas {
+    /// tag -> number of stanzas with that tag.
+    pub by_type: BTreeMap<String, usize>,
+}
+
+impl HeaderStanzas {
+    fn add(&mut self, tag: &str) {
+        *self.by_type.entry(tag.to_owned()).or_insert(0) += 1;
+    }
+
     /// `-> X25519 ...` stanzas: one per X25519 recipient the file was
     /// encrypted to.
-    pub x25519: usize,
+    pub fn x25519(&self) -> usize {
+        self.by_type.get(X25519_TAG).copied().unwrap_or(0)
+    }
+
     /// Stanzas of any other type — a passphrase (`scrypt`) or a plugin
-    /// recipient. Grease is NOT counted here (see `header_stanzas`).
-    pub other: usize,
+    /// recipient.
+    pub fn other(&self) -> usize {
+        self.total() - self.x25519()
+    }
+
+    /// Every recipient stanza, whatever its type.
+    pub fn total(&self) -> usize {
+        self.by_type.values().sum()
+    }
+}
+
+/// "2 X25519 key(s)", or with the other types spelled out: "2 X25519
+/// key(s) and 1 other recipient stanza(s) (scrypt)".
+impl fmt::Display for HeaderStanzas {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} X25519 key(s)", self.x25519())?;
+        let others: Vec<&str> = self
+            .by_type
+            .keys()
+            .map(String::as_str)
+            .filter(|t| *t != X25519_TAG)
+            .collect();
+        if !others.is_empty() {
+            write!(
+                f,
+                " and {} other recipient stanza(s) ({})",
+                self.other(),
+                others.join(", ")
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The stanza tag a `recipient` line's key type corresponds to, when this
+/// implementation recognizes the type (§5). `None` for a type it cannot
+/// tell apart (a plugin recipient): its stanzas are not comparable.
+pub fn recipient_tag(recipient: &str) -> Option<&'static str> {
+    use std::str::FromStr;
+    if Recipient::from_str(recipient).is_ok() {
+        return Some(X25519_TAG);
+    }
+    None
+}
+
+/// §5: the stanzas a set of `recipient` lines calls for, by type — or
+/// `None` when a line is of a type this implementation does not recognize
+/// (the check does not apply then).
+pub fn declared_stanzas<'a, I>(recipients: I) -> Option<HeaderStanzas>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let mut counts = HeaderStanzas::default();
+    for r in recipients {
+        counts.add(recipient_tag(r)?);
+    }
+    Some(counts)
 }
 
 /// §5 declared-vs-actual: count the recipient stanzas in an age file's
@@ -104,10 +180,7 @@ pub fn header_stanzas(ciphertext: &[u8]) -> Option<HeaderStanzas> {
     if !first.starts_with(b"age-encryption.org/") {
         return None;
     }
-    let mut counts = HeaderStanzas {
-        x25519: 0,
-        other: 0,
-    };
+    let mut counts = HeaderStanzas::default();
     for line in lines {
         if line.starts_with(b"---") {
             return Some(counts);
@@ -116,18 +189,16 @@ pub fn header_stanzas(ciphertext: &[u8]) -> Option<HeaderStanzas> {
             continue; // a stanza body line
         };
         let tag = stanza.split(|b| *b == b' ').next().unwrap_or_default();
-        if tag == b"X25519" {
-            counts.x25519 += 1;
-        } else if !tag.ends_with(b"-grease") {
-            counts.other += 1;
+        if !tag.ends_with(b"-grease") {
+            counts.add(&String::from_utf8_lossy(tag));
         }
     }
     None // no MAC line: truncated header, not something to reason about
 }
 
-/// The X25519 stanza count alone (`header_stanzas`), for the §5 check.
+/// The X25519 stanza count alone (`header_stanzas`).
 pub fn recipient_count(ciphertext: &[u8]) -> Option<usize> {
-    header_stanzas(ciphertext).map(|h| h.x25519)
+    header_stanzas(ciphertext).map(|h| h.x25519())
 }
 
 /// Decrypt with any of the given identities.
@@ -173,27 +244,44 @@ mod tests {
         // it is random, so counting it makes the §5 check fail at random.
         let greased: &[u8] = b"age-encryption.org/v1\n-> X25519 aaaa\nbbbb\n-> <+=V!r-grease *pYpm6zm pr\n\n--- mac\n";
         assert_eq!(recipient_count(greased), Some(1));
-        assert_eq!(
-            header_stanzas(greased),
-            Some(HeaderStanzas {
-                x25519: 1,
-                other: 0
-            })
-        );
-        // A non-X25519 recipient (passphrase, plugin) is counted apart: the
-        // §5/§9.2 counts are not comparable then.
+        let h = header_stanzas(greased).expect("readable header");
+        assert_eq!((h.x25519(), h.other(), h.total()), (1, 0, 1));
+        assert_eq!(h.to_string(), "1 X25519 key(s)");
+        // A non-X25519 recipient (passphrase, plugin) is counted under its
+        // own tag: the §5 check compares by type.
         let mixed: &[u8] = b"age-encryption.org/v1\n-> X25519 aaaa\nbbbb\n-> scrypt cccc 18\ndddd\n-> piv-p256 eeee\nffff\n--- mac\n";
+        let h = header_stanzas(mixed).expect("readable header");
+        assert_eq!((h.x25519(), h.other(), h.total()), (1, 2, 3));
+        assert_eq!(h.by_type["scrypt"], 1);
+        assert_eq!(h.by_type["piv-p256"], 1);
         assert_eq!(
-            header_stanzas(mixed),
-            Some(HeaderStanzas {
-                x25519: 1,
-                other: 2
-            })
+            h.to_string(),
+            "1 X25519 key(s) and 2 other recipient stanza(s) (piv-p256, scrypt)"
         );
         assert_eq!(
             header_stanzas(b"age-encryption.org/v1\n-> X25519 a\n"),
             None
         );
+    }
+
+    #[test]
+    fn declared_stanzas_follow_the_recipient_types() {
+        // §5: what the `recipient` lines call for, by type; a type this
+        // implementation cannot classify makes the set incomparable.
+        let a = Identity::generate().to_public().to_string();
+        let b = Identity::generate().to_public().to_string();
+        let d = declared_stanzas([&a, &b]).expect("two X25519 lines");
+        assert_eq!(
+            d.by_type,
+            [(X25519_TAG.to_owned(), 2)].into_iter().collect()
+        );
+        assert_eq!(recipient_tag(&a), Some(X25519_TAG));
+        assert_eq!(recipient_tag("age1yubikey1qwerty"), None);
+        assert_eq!(
+            declared_stanzas([&a, &"age1yubikey1qwerty".to_owned()]),
+            None
+        );
+        assert_eq!(declared_stanzas([]), Some(HeaderStanzas::default()));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::path::Path;
 
 use age::x25519::Identity;
 use common::*;
+use sealed::crypt;
 use sealed::manifest::{BundleRecord, Manifest, ObjectFormat};
 
 fn rev(repo: &Path, r: &str) -> String {
@@ -95,6 +96,146 @@ fn manifest_encrypted_to_more_keys_than_it_declares_is_refused_on_read() {
     );
     assert_ok(&out, "clone of the consistent generation");
     assert_eq!(rev(&scratch.join("fixed"), "refs/heads/main"), c1);
+}
+
+#[test]
+fn rollback_is_reported_before_a_recipient_mismatch() {
+    // §5: the check runs "after the manifest has passed the
+    // trust-on-first-use checks (§7.4 first, so that a rolled-back or
+    // substituted vault is reported as such)". A replayed generation that
+    // also mismatches must say "rolled back", not "not an attack".
+    let scratch = scratch("r-declared-order");
+    let ids: Vec<Identity> = (0..3).map(|_| Identity::generate()).collect();
+    let id_file = identity_file(&scratch, &ids[0]);
+    let remote = VaultRemote::init(scratch.join("vault.git"));
+    let src = SourceRepo::init(scratch.join("src"), "sha1");
+    let c1 = src.commit_file("note.md", "one\n", "first");
+    let bundle = src.bundle(&scratch.join("b1.bundle"), &["HEAD", "--all"]);
+    let three: Vec<_> = ids.iter().map(Identity::to_public).collect();
+
+    // Generation 1: three stanzas, two lines (a buggy writer).
+    let declared: Vec<String> = three[..2].iter().map(ToString::to_string).collect();
+    let mut files = Vec::new();
+    add_hint(&mut files);
+    let rec = add_bundle(&mut files, &three[0], 1, true, &bundle, None);
+    let m = hand_manifest(&"ee".repeat(16), rec, &c1, &declared);
+    add_manifest_to(&mut files, &three, &m);
+    let buggy = remote.commit(&files, "main");
+
+    // Generation 2 repairs it (same vault, counter 2, all three declared).
+    let all: Vec<String> = three.iter().map(ToString::to_string).collect();
+    let mut files = Vec::new();
+    add_hint(&mut files);
+    let rec = add_bundle(&mut files, &three[0], 1, true, &bundle, None);
+    let mut m = hand_manifest(&"ee".repeat(16), rec, &c1, &all);
+    m.counter = 2;
+    add_manifest_to(&mut files, &three, &m);
+    remote.commit(&files, "main");
+    let out = sealed_git(
+        &scratch,
+        &["clone", "-q", &remote.sealed_url(), "clone"],
+        &id_file,
+        &[],
+    );
+    assert_ok(&out, "clone of the repaired generation");
+    let dest = scratch.join("clone");
+
+    // The host replays generation 1.
+    remote.set_branch("main", &buggy);
+    let out = sealed_git(&dest, &["fetch", "-q", "origin"], &id_file, &[]);
+    assert!(!out.status.success(), "a rollback must be refused");
+    let err = stderr_of(&out);
+    assert!(err.contains("rolled back"), "{err}");
+    assert!(!err.contains("not an attack"), "{err}");
+}
+
+#[test]
+fn compact_repair_rewrites_a_mismatched_vault_to_its_declared_set() {
+    // §5: "an implementation MAY offer a repair, which is a compaction that
+    // reads through the mismatch and rewrites the vault encrypted to the
+    // set the manifest declares". Every other command refuses the vault
+    // and names the repair.
+    let scratch = scratch("r-repair");
+    let ids: Vec<Identity> = (0..3).map(|_| Identity::generate()).collect();
+    let id_file = identity_file(&scratch, &ids[0]);
+    let remote = VaultRemote::init(scratch.join("vault.git"));
+    let src = SourceRepo::init(scratch.join("src"), "sha1");
+    let c1 = src.commit_file("note.md", "one\n", "first");
+    let bundle = src.bundle(&scratch.join("b1.bundle"), &["HEAD", "--all"]);
+    let three: Vec<_> = ids.iter().map(Identity::to_public).collect();
+    let declared: Vec<String> = three[..2].iter().map(ToString::to_string).collect();
+    let mut files = Vec::new();
+    add_hint(&mut files);
+    let rec = add_bundle(&mut files, &three[0], 1, true, &bundle, None);
+    let m = hand_manifest(&"ec".repeat(16), rec, &c1, &declared);
+    add_manifest_to(&mut files, &three, &m);
+    remote.commit(&files, "main");
+    src.add_remote("origin", &remote.sealed_url());
+
+    // Plain compact, enroll and fetch all refuse, pointing at the repair.
+    let third = three[2].to_string();
+    for args in [vec!["compact", "origin"], vec!["enroll", &third, "origin"]] {
+        let out = cli(&src.dir, &id_file, &args);
+        assert!(!out.status.success(), "{args:?}");
+        let err = stderr_of(&out);
+        assert!(err.contains("declares 2 recipient(s)"), "{args:?}: {err}");
+        assert!(
+            err.contains("`git-remote-sealed compact --repair`"),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(
+        !sealed_git(&src.dir, &["fetch", "-q", "origin"], &id_file, &[])
+            .status
+            .success()
+    );
+
+    // The repair: a compaction encrypted to exactly the declared set.
+    let out = cli(&src.dir, &id_file, &["compact", "--repair", "origin"]);
+    assert_ok(&out, "compact --repair");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("compacted and repaired"), "{text}");
+    assert!(
+        text.contains("declares 2 recipient(s) but its ciphertext is encrypted to 3 X25519 key(s)"),
+        "{text}"
+    );
+    assert!(text.contains("encrypted to 2 recipient(s)"), "{text}");
+    let m = remote.manifest("main", &ids[0]);
+    assert_eq!(m.recipients.iter().cloned().collect::<Vec<_>>(), {
+        let mut d = declared.clone();
+        d.sort();
+        d
+    });
+    assert_eq!(m.counter, 2);
+    for name in ["sealed-manifest.age", "2-full.bundle.age"] {
+        assert_eq!(
+            crypt::recipient_count(&remote.file_bytes("main", name)),
+            Some(2),
+            "{name}"
+        );
+    }
+    // The undeclared key is locked out; a declared one reads everything.
+    let out = sealed_git(
+        &scratch,
+        &["clone", "-q", &remote.sealed_url(), "clone-third"],
+        &identity_file_named(&scratch, "third.txt", &ids[2]),
+        &[],
+    );
+    assert!(!out.status.success(), "the undeclared key is out");
+    let out = sealed_git(
+        &scratch,
+        &["clone", "-q", &remote.sealed_url(), "clone-second"],
+        &identity_file_named(&scratch, "second.txt", &ids[1]),
+        &[],
+    );
+    assert_ok(&out, "clone as a declared recipient");
+    assert_eq!(rev(&scratch.join("clone-second"), "refs/heads/main"), c1);
+    // Without a mismatch, --repair is a plain compaction.
+    let out = cli(&src.dir, &id_file, &["compact", "--repair", "origin"]);
+    assert_ok(&out, "compact --repair on a consistent vault");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("repaired"), "{text}");
+    assert_eq!(remote.manifest("main", &ids[0]).counter, 3);
 }
 
 // ===================== §9.1 enroll / revoke =====================

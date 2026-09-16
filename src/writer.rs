@@ -180,11 +180,7 @@ impl fmt::Display for WriteError {
                 stanzas,
             } => {
                 let ciphertext = match stanzas {
-                    Some(h) if h.other == 0 => format!("{} X25519 key(s)", h.x25519),
-                    Some(h) => format!(
-                        "{} X25519 key(s) and {} other recipient stanza(s)",
-                        h.x25519, h.other
-                    ),
+                    Some(h) => h.to_string(),
                     None => "an unknown number of keys".to_owned(),
                 };
                 write!(
@@ -240,8 +236,8 @@ impl fmt::Display for WriteError {
                 "cannot check the recipient set: the vault's manifest is encrypted to {} X25519 key(s) and {} recipient stanza(s) of another type, so the set size cannot be determined from the ciphertext. \
                  This device would record {} recipient(s):\n{}\n\
                  If that is exactly the set every device uses, re-run with --yes",
-                stanzas.x25519,
-                stanzas.other,
+                stanzas.x25519(),
+                stanzas.other(),
                 would_record.len(),
                 bullet_list(would_record)
             ),
@@ -442,7 +438,7 @@ pub(crate) fn writable_set(p: &Prepared, cfg: &WriterConfig) -> Result<Vec<Recip
     if m.is_pre_recipient() {
         return Err(WriteError::PreRecipientVault {
             would_record: cfg.upgrade_set().iter().map(ToString::to_string).collect(),
-            stanzas: p.manifest_stanzas(),
+            stanzas: p.manifest_stanzas().cloned(),
         });
     }
     recipients_of(m)
