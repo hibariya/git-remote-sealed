@@ -56,7 +56,7 @@ read.
 - `git-remote-sealed info` — this device's key, what it remembers about the vault, and the keys the vault is encrypted to.
 - `git-remote-sealed enroll <age1...>` — add a key.
 - `git-remote-sealed revoke <age1...>` — remove a key (`--yes` to remove this device's own key).
-- `git-remote-sealed compact` — rewrite the vault as one snapshot. Deleted history really leaves the host here.
+- `git-remote-sealed compact` — rewrite the vault as one snapshot. Deleted history really leaves the host here. `--repair` also fixes a vault whose recorded keys do not match what it is encrypted to.
 - `git-remote-sealed upgrade` — for vaults made with 0.2.x (see below).
 - `git-remote-sealed forget --yes` — forget what this repository knows about a vault you re-created on purpose. Read its warning first.
 
