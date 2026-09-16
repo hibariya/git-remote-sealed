@@ -235,6 +235,12 @@ routine push is the wrong moment to do that silently.
 
 ## Appendix B. Version history
 
+- **Errata** (2026-09-16), from a review of the first implementation
+  of the extension below: §5's declared-vs-actual check compares
+  stanzas by type (a stanza of an undeclared type is a mismatch) and
+  runs after §7.4's checks; an explicit repair compaction is permitted;
+  §9.2 lets a user confirm a smaller set (a lost device) instead of
+  refusing it outright. No format change.
 - **Extension** (2026-09-14): the `recipient` manifest line (§7.2)
   makes the vault declare its own recipient set (§5). Every file of a
   generation is encrypted to exactly that set; the set changes only by

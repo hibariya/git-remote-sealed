@@ -107,8 +107,9 @@ pub enum WriteError {
         key: String,
     },
     /// §9.2: the set this device would record is not the size of the
-    /// manifest ciphertext's X25519 recipient set. Both directions are
-    /// refused; a larger set is the stale-configuration case.
+    /// manifest ciphertext's X25519 recipient set. A larger set is the
+    /// stale-configuration case, refused outright; a smaller one is
+    /// refused until confirmed (`--yes`: a lost device).
     UpgradeCountMismatch {
         would_record: Vec<String>,
         stanzas: usize,
@@ -235,7 +236,8 @@ impl fmt::Display for WriteError {
             } => {
                 let configured = would_record.len();
                 let advice = if configured < *stanzas {
-                    "A smaller set would lock out a current reader: add the missing key(s) to `sealed.recipients` here (each other device shows its own under `git-remote-sealed info`) and retry"
+                    "A smaller set would lock out a current reader: add the missing key(s) to `sealed.recipients` here (each other device shows its own under `git-remote-sealed info`) and retry. \
+                     If a key is gone for good (a lost device), re-run with --yes to record the smaller set; whoever held that key can then no longer read the vault"
                 } else {
                     "A larger set is almost always a stale global entry; check `git config --show-origin --get-all sealed.recipients`, remove the extra key(s), and retry (a key that does belong can be enrolled after the upgrade)"
                 };

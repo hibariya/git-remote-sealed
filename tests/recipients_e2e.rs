@@ -710,8 +710,32 @@ fn upgrade_refuses_a_smaller_set_reporting_both_counts() {
     assert!(err.contains(&fx.key_a), "{err}");
     assert!(err.contains("encrypted to 2 X25519 key(s)"), "{err}");
     assert!(err.contains("lock out a current reader"), "{err}");
+    assert!(err.contains("re-run with --yes"), "{err}");
     assert_eq!(fx.remote.tip("main"), tip);
     assert!(fx.manifest().is_pre_recipient());
+
+    // §9.2: "It MUST be refused unless the user confirms it explicitly,
+    // and the confirmation MUST be told both counts and that the
+    // unrecorded keys can no longer read the result." The lost-device
+    // case: device B is gone, its key with it.
+    let out = cli(&dest, &fx.id_a, &["upgrade", "--yes", "origin"]);
+    assert_ok(&out, "upgrade --yes with a smaller set");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("encrypted to 1 recipient(s)"), "{text}");
+    let err = stderr_of(&out);
+    assert!(
+        err.contains(
+            "recorded 1 recipient(s) for a vault that was encrypted to 2: the 1 key(s) not recorded can no longer read it"
+        ),
+        "{err}"
+    );
+    let m = fx.manifest();
+    assert_eq!(m.recipients.iter().collect::<Vec<_>>(), vec![&fx.key_a]);
+    assert!(
+        !fx.clone_as(&fx.id_b, "clone-b").status.success(),
+        "B is out"
+    );
+    assert_ok(&fx.clone_as(&fx.id_a, "clone-a2"), "A reads the result");
 }
 
 #[test]
@@ -737,6 +761,19 @@ fn upgrade_refuses_a_larger_set_reporting_both_counts() {
         "{err}"
     );
     assert_eq!(fx.remote.tip("main"), tip);
+    assert!(fx.manifest().is_pre_recipient());
+    // No confirmation records a larger set: --yes is for the lost-device
+    // case (a smaller set) and the undeterminable count, not for this.
+    let out = cli(&dest, &fx.id_a, &["upgrade", "--yes", "origin"]);
+    assert!(
+        !out.status.success(),
+        "a larger set is refused with --yes too"
+    );
+    assert!(
+        stderr_of(&out).contains("would record 3 recipient(s)"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(fx.manifest().is_pre_recipient());
 }
 

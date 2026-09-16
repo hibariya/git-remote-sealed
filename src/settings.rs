@@ -139,7 +139,7 @@ impl Settings {
         // the user the upgrade's count check is about to confuse.
         if srcrepo::config_get(&git_dir, "sealed.allow-recipient-shrink")?.is_some() {
             eprintln!(
-                "git-remote-sealed: warning: sealed.allow-recipient-shrink has no effect since 0.3.0 (`git-remote-sealed revoke <age1...>` removes a key); remove it from config: git config --show-origin --get-all sealed.allow-recipient-shrink"
+                "git-remote-sealed: warning: sealed.allow-recipient-shrink has no effect since 0.3.0 (`git-remote-sealed revoke <age1...>` removes a key; `upgrade --yes` records a smaller set); remove it from config: git config --show-origin --get-all sealed.allow-recipient-shrink"
             );
         }
 

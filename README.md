@@ -73,8 +73,10 @@ Until then, reads work but pushes are refused with a message that says
 to run it. The recorded keys are this device's key plus the old
 `sealed.recipients` setting, and their number must match how many keys
 the vault is already encrypted to. If it does not, the upgrade is
-refused and prints both numbers. After the upgrade, delete
-`sealed.recipients` from your git config; `enroll` replaces it.
+refused and prints both numbers. If a key is gone for good (a lost
+device), `upgrade --yes` records the smaller set and locks that key
+out. After the upgrade, delete `sealed.recipients` from your git
+config; `enroll` replaces it.
 
 Do it in this order: upgrade every old vault first, then delete the
 setting, then create new vaults. A leftover `sealed.recipients` in your

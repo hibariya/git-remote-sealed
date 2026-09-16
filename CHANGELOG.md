@@ -16,6 +16,12 @@ The declared-vs-actual recipient check:
 - The check runs after the rollback and vault-identity checks, so a
   replayed generation is reported as a rollback, not as a writer bug.
 
+`upgrade --yes` now records a set smaller than the vault is encrypted
+to, for a lost device, and says which count it dropped. Before, a
+0.2.x user who had lost a device had no way to upgrade: every other
+write was refused until the upgrade, and the upgrade refused the
+smaller set. A larger set is still refused.
+
 The old `sealed.recipients` setting:
 
 - The first push to a new vault, refused because a leftover (usually

@@ -11,7 +11,8 @@
 //!   and compact; `--yes` is required to remove this device's own key;
 //! - `upgrade [--yes] [<remote-or-url>]` — §9.2: record the recipient set
 //!   in a vault written before the manifest declared one; `--yes` accepts
-//!   the set when the ciphertext's recipient count cannot be determined;
+//!   a smaller set than the vault is encrypted to (a lost device) and the
+//!   set when the ciphertext's recipient count cannot be determined;
 //! - `forget --yes [<remote-or-url>]` — §7.5: discard this repository's
 //!   mirror and vault binding for that remote, and the vault's pin and
 //!   sequence memory unless another remote URL of this repository is still
@@ -170,8 +171,9 @@ pub const USAGE: &str = "usage: git-remote-sealed <remote> <url>            (inv
             and compact, so the whole history becomes readable by it\n\
   revoke    remove a recipient and compact (--yes to remove this device's own)\n\
   upgrade   record the recipient set in a vault written before 0.3.0; it must\n\
-            match the number of keys the vault is encrypted to (--yes when\n\
-            that number cannot be determined)\n\
+            match the number of keys the vault is encrypted to (--yes to record\n\
+            fewer, locking a lost device out, or when that number cannot be\n\
+            determined)\n\
   compact   rewrite the vault as one snapshot; deleted history leaves the host\n\
             (--repair: also when the vault is encrypted to a different set\n\
             than its manifest declares, which every other command refuses)\n\

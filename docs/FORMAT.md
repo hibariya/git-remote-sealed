@@ -857,13 +857,18 @@ manifest adds the `recipient` lines; everything else is §9 unchanged
 recorded is the set the upgrading writer is configured with, and it
 MUST satisfy §5's declared-vs-actual rule against the manifest
 ciphertext it read: when that ciphertext's X25519 stanza count can be
-determined, the configured set's size MUST equal it. A smaller set
-would lock out a current reader; a **larger** set is just as invalid —
-it is almost always a stale configuration, and recording it would make
-the mistake the vault's truth. Both MUST be refused, reporting both
-counts. When the count cannot be determined (non-X25519 stanzas, or a
-header the implementation cannot read), the implementation MUST have
-the user confirm the set explicitly.
+determined, the configured set's size MUST equal it. A **larger** set
+is almost always a stale configuration, and recording it would make
+the mistake the vault's truth: it MUST be refused, reporting both
+counts. A **smaller** set locks a current reader out — which is wrong
+by accident and right on purpose: a device whose key is gone for good
+has no other way out of the set, since every other write is refused
+until the upgrade. It MUST be refused unless the user confirms it
+explicitly, and the confirmation MUST be told both counts and that the
+unrecorded keys can no longer read the result. When the count cannot
+be determined (non-X25519 stanzas, or a header the implementation
+cannot read), the implementation MUST have the user confirm the set
+explicitly.
 
 The count check is necessary, not sufficient: a stale key that
 *replaces* a real one keeps the count equal and still locks a current

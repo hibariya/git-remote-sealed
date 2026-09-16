@@ -75,8 +75,10 @@ pub enum SetChange {
     Revoke { key: Recipient, yes: bool },
     /// §9.2: a pre-recipient vault gains `recipient` lines = this device's
     /// configured set (`WriterConfig::upgrade_set`), whose size must equal
-    /// the manifest ciphertext's X25519 stanza count; `yes` accepts the
-    /// set when that count cannot be determined.
+    /// the manifest ciphertext's X25519 stanza count; `yes` accepts a
+    /// SMALLER set (a lost device: whoever held the missing key is locked
+    /// out) and the set when that count cannot be determined. A larger
+    /// set is refused regardless: it is a stale configuration.
     Upgrade { yes: bool },
 }
 
@@ -284,7 +286,7 @@ fn new_set(
     let m = p.manifest();
     match (change, m.is_pre_recipient()) {
         // §9.2: the one write a pre-recipient vault takes...
-        (SetChange::Upgrade { yes }, true) => return upgrade_set(p, cfg, *yes).map(Some),
+        (SetChange::Upgrade { yes }, true) => return upgrade_set(p, cfg, *yes, warnings).map(Some),
         // ...and it is idempotent: a vault that records its set is left alone.
         (SetChange::Upgrade { .. }, false) => return Ok(None),
         // §5/§9.1: every other change is refused there; §9.2 comes first.
@@ -330,17 +332,31 @@ fn new_set(
 
 /// §9.2: the set an upgrade records — this device's configured set,
 /// checked against the manifest ciphertext's recipient count.
-fn upgrade_set(p: &Prepared, cfg: &WriterConfig, yes: bool) -> Result<Vec<Recipient>, WriteError> {
+fn upgrade_set(
+    p: &Prepared,
+    cfg: &WriterConfig,
+    yes: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Recipient>, WriteError> {
     let set = cfg.upgrade_set();
     let would_record: Vec<String> = set.iter().map(ToString::to_string).collect();
     match p.manifest_stanzas() {
-        // The count can be determined: it MUST equal the set's size,
-        // smaller and larger alike.
+        // The count can be determined. A larger set is a stale
+        // configuration and is refused outright; a smaller one locks a
+        // current reader out, which is exactly what a lost device needs
+        // and what nothing else should do — so it takes `yes`.
         Some(h) if h.other() == 0 => {
-            if set.len() != h.x25519() {
+            let stanzas = h.x25519();
+            if set.len() < stanzas && yes {
+                warnings.push(format!(
+                    "recorded {} recipient(s) for a vault that was encrypted to {stanzas}: the {} key(s) not recorded can no longer read it",
+                    set.len(),
+                    stanzas - set.len()
+                ));
+            } else if set.len() != stanzas {
                 return Err(WriteError::UpgradeCountMismatch {
                     would_record,
-                    stanzas: h.x25519(),
+                    stanzas,
                 });
             }
         }
