@@ -320,23 +320,14 @@ pub fn inspect_with(
 ) -> Result<Inspection, ReadError> {
     // §6.1: current committed tree (the mirror was reset, not merged).
     let tree = vault.fetch()?;
-    // §7.4: the vault this URL is bound to (None = nothing was ever pinned
-    // through this spelling), and the pin that vault has — ONE pin per
-    // vault, shared by every URL that reaches it.
+    // §7.4: ONE pin per vault, shared by every URL that reaches it; each
+    // URL is bound to the vault first pinned through it.
     let pins = vault.pins()?;
-    let expected_vault = pins.association(vault.url())?;
-    let prev_pin = match &expected_vault {
-        Some(vault_id) => pins.load_vault(vault_id)?,
-        None => None,
-    };
-    // A binding whose pin file is gone still says a vault lived at this
-    // URL: an empty remote there is a reset, not first contact.
-    let pinned = expected_vault.is_some();
 
     let Some(tree) = tree else {
         // §7.4: a pinned reader MUST refuse an empty vault (no manifest) —
         // otherwise a host could reset the pin via re-initialization.
-        pinstore::check_empty_vault(pinned)?;
+        pins.check_empty_at(vault.url())?;
         return Ok(Inspection::Empty);
     };
 
@@ -361,7 +352,7 @@ pub fn inspect_with(
         // A committed tree with no manifest and no bundles is an empty
         // vault for §7.4's purposes ("no manifest at all"), whatever else
         // the tree holds.
-        pinstore::check_empty_vault(pinned)?;
+        pins.check_empty_at(vault.url())?;
         return Ok(Inspection::Empty);
     };
 
@@ -380,26 +371,9 @@ pub fn inspect_with(
     // `format 2` only, so hint == manifest format on every success path.
 
     // §7.4 vault identity, before anything else about the manifest: a URL
-    // bound to a vault must keep serving that vault. This runs BEFORE any
-    // pin is looked up by the manifest's own identity, or a substituted
-    // vault would simply meet a fresh pin.
-    if let Some(expected) = &expected_vault {
-        if *expected != manifest.vault_id {
-            return Err(PinError::VaultMismatch {
-                pinned: expected.clone(),
-                seen: manifest.vault_id.clone(),
-            }
-            .into());
-        }
-    }
-    // §7.4: pins are per (repository, VAULT). First contact through THIS
-    // URL spelling still meets the pin the repository holds for the vault
-    // identity the manifest declares — a respelled remote, or an SSH
-    // spelling of an HTTPS one, must not reset rollback protection.
-    let prev_pin = match prev_pin {
-        Some(pin) => Some(pin),
-        None => pins.load_vault(&manifest.vault_id)?,
-    };
+    // bound to a vault must keep serving that vault; a new URL spelling
+    // meets the one pin the repository holds for the vault (`pin_for_read`).
+    let prev_pin = pins.pin_for_read(vault.url(), &manifest.vault_id)?;
 
     // ...including the §7.4 trust-on-first-use battery.
     let next_pin =

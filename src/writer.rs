@@ -43,7 +43,7 @@ use crate::bundling::{self, BundleError, BundleSpec, Stored};
 use crate::crypt::{self, CryptError, HeaderStanzas};
 use crate::manifest::{BundleRecord, Manifest, ManifestError, ObjectFormat, MAX_COUNTER};
 use crate::names::{self, BundleName, NameClass, NameError, MAX_SEQ};
-use crate::pinstore::{self, Pin, PinError};
+use crate::pinstore::{self, PinError, WritePins};
 use crate::reader::{self, Inspection, Prepared, ReadError};
 use crate::srcrepo;
 use crate::vaultrepo::{self, GitError, PushOutcome, TreeEntry, VaultRepo};
@@ -764,18 +764,10 @@ impl Ctx<'_> {
                 Ok(PushOutcome::Accepted) => {
                     // No pin existed (a pinned reader refuses an empty vault,
                     // §7.4), so there was nothing to bind before the push;
-                    // the advanced pin now records generation 1 and our
-                    // binding for sequence 1.
-                    let pin = Pin {
-                        vault_id: manifest.vault_id.clone(),
-                        counter: 1,
-                        manifest_digest,
-                        format: FORMAT_VERSION,
-                        object_format: of,
-                        seqfloor: 1,
-                        sequence_memory: [(1, stored.digest.clone())].into_iter().collect(),
-                        pending: BTreeMap::new(),
-                    };
+                    // the first pin records generation 1 and our binding for
+                    // sequence 1.
+                    let pin =
+                        pinstore::initialized_pin(&manifest, &manifest_digest, &stored.digest);
                     self.vault
                         .save_pin(&pin)
                         .map_err(WriteError::AckedButPinNotSaved)?;
@@ -921,21 +913,8 @@ impl Ctx<'_> {
             refs,
         };
 
-        // The pin we build on: the battery's result, but with THIS
-        // repository's memory only — the base manifest's bundles were read,
-        // not applied (§7.4), so they are not recorded here.
-        let mut pin_base = p.next_pin().clone();
-        pin_base.sequence_memory = p
-            .prev_pin()
-            .map(|prev| prev.sequence_memory.clone())
-            .unwrap_or_default();
-        // §8.4: settle this device's pending bindings against the base. One
-        // the base binds to OUR ciphertext landed after all — it is ours and
-        // applied by construction, so it joins the memory even here; one the
-        // base's `seqfloor` has passed without binding it to us drops out.
-        let resolution = pinstore::resolve_pending(p.prev_pin(), m);
-        pin_base.sequence_memory.extend(resolution.promoted.clone());
-        pin_base.pending = resolution.pending;
+        // Every pin decision of this write (§8.4): see `WritePins`.
+        let mut pins = WritePins::for_push(p.prev_pin(), p.next_pin(), m);
 
         let scratch = self.vault.scratch_dir()?;
         let mut stored = Stored {
@@ -952,7 +931,7 @@ impl Ctx<'_> {
                 .checked_add(1)
                 .filter(|s| *s <= MAX_SEQ)
                 .ok_or(WriteError::SequenceExhausted)?;
-            let seq = pinstore::allocate_from(&pin_base.sequence_memory, &pin_base.pending, first)?;
+            let seq = pins.allocate(first)?;
             // §4.1: -full iff the pre-push generation's bundle list is empty.
             let full = m.bundles.is_empty();
             let name = BundleName::new(seq, full, None)?;
@@ -990,6 +969,7 @@ impl Ctx<'_> {
                 },
             );
             manifest.seqfloor = seq;
+            pins.bind(seq, &stored.digest);
             allocated = Some((seq, full));
         }
 
@@ -1005,21 +985,16 @@ impl Ctx<'_> {
 
         // Memory before the push (see the module comment): PENDING until the
         // push is acknowledged.
-        let mut pin_bound = pin_base.clone();
-        if let Some((seq, _)) = allocated {
-            pin_bound.pending.insert(seq, stored.digest.clone());
-            self.vault.save_pin(&pin_bound)?;
+        if let Some(pin) = pins.before_push() {
+            self.vault.save_pin(&pin)?;
         }
 
         match self.vault.push_commit(&commit, &p.tree().branch, None)? {
             PushOutcome::Accepted => {
                 // Acknowledged: our own binding, and every pending number
                 // this generation's seqfloor just burned, become CONFIRMED.
-                let mut acked = pin_bound.clone();
-                pinstore::confirm_acked(&mut acked, manifest.seqfloor);
-                let pin = advanced_pin(&acked, &manifest, &manifest_digest);
                 self.vault
-                    .save_pin(&pin)
+                    .save_pin(&pins.on_ack(&manifest, &manifest_digest))
                     .map_err(WriteError::AckedButPinNotSaved)?;
                 Ok(Attempt::Done(PushReport {
                     results,
@@ -1035,13 +1010,9 @@ impl Ctx<'_> {
             PushOutcome::Rejected(summary) => {
                 // §8.5 definitive: a ref-level rejection proves the write did
                 // not land, so the binding is withdrawn before the retry —
-                // that binding only. `pin_base` is this read's pin: going back
-                // to the pin from before the read would also drop what the
-                // read confirmed (a pending number the base binds to our own
-                // ciphertext), and the retry could then accept a manifest
-                // that re-binds it. compact.rs does the same.
-                if allocated.is_some() {
-                    self.vault.save_pin(&pin_base)?;
+                // that binding only (`WritePins::on_reject`).
+                if let Some(pin) = pins.on_reject() {
+                    self.vault.save_pin(&pin)?;
                 }
                 Ok(Attempt::Rejected(summary))
             }
@@ -1210,21 +1181,6 @@ pub(crate) fn build_commit(
     let parents: Vec<&str> = parent.into_iter().collect();
     let commit = vault.commit_tree(&tree, &parents)?;
     Ok((commit, manifest_digest))
-}
-
-/// The pin after an acknowledged write: the new generation's counter and
-/// twin digest, seqfloor never lower than before, memory as `bound` has it.
-pub(crate) fn advanced_pin(bound: &Pin, manifest: &Manifest, manifest_digest: &str) -> Pin {
-    Pin {
-        vault_id: manifest.vault_id.clone(),
-        counter: manifest.counter,
-        manifest_digest: manifest_digest.to_owned(),
-        format: manifest.format,
-        object_format: manifest.object_format,
-        seqfloor: bound.seqfloor.max(manifest.seqfloor),
-        sequence_memory: bound.sequence_memory.clone(),
-        pending: bound.pending.clone(),
-    }
 }
 
 /// §7.2: a random vault identity, at least 128 bits, lowercase hex. Drawn

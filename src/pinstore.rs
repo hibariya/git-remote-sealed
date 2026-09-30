@@ -366,6 +366,135 @@ pub fn allocate_from(
     }
 }
 
+/// §8.4: every pin decision of one write, from its read to its verdict.
+///
+/// A write reads the vault, maybe allocates a sequence number, pushes, and
+/// then learns one of three outcomes. Which pin to save at each point is
+/// the subtle part of §8.4, so it lives here as plain data, and the writers
+/// (`writer.rs`, `compact.rs`) only call it:
+///
+/// - [`before_push`](WritePins::before_push): the new binding, PENDING,
+///   saved before the push so a lost acknowledgement can never re-allocate
+///   the number;
+/// - [`on_ack`](WritePins::on_ack): acknowledged — the binding and every
+///   number the published `seqfloor` burned become CONFIRMED;
+/// - [`on_reject`](WritePins::on_reject): definitively rejected — withdraw
+///   the new binding and NOTHING else. The read's pin stays: going back to
+///   the pin from before the read would also drop what the read confirmed,
+///   and the retry could then accept a manifest that re-binds it;
+/// - no outcome at all: the pending binding stays exactly as saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritePins {
+    /// The pin this write builds on: the read's, with this device's own
+    /// memory only.
+    base: Pin,
+    /// The (sequence number, bundle ciphertext digest) this write allocated.
+    bound: Option<(u64, String)>,
+}
+
+impl WritePins {
+    /// A push (§8). `next` is the battery's result for the base manifest
+    /// `base`, `prev` the pin it ran against. The base's bundles were read,
+    /// not applied, so they are NOT recorded (§7.4). Pending bindings are
+    /// settled against it: one the base binds to our own ciphertext landed
+    /// after all — ours, and applied by construction, so it joins the memory
+    /// even here; one the base's `seqfloor` passed without binding it to us
+    /// drops out.
+    pub fn for_push(prev: Option<&Pin>, next: &Pin, base: &Manifest) -> WritePins {
+        let resolution = resolve_pending(prev, base);
+        let mut memory = prev.map(|p| p.sequence_memory.clone()).unwrap_or_default();
+        memory.extend(resolution.promoted);
+        WritePins {
+            base: Pin {
+                sequence_memory: memory,
+                pending: resolution.pending,
+                ..next.clone()
+            },
+            bound: None,
+        }
+    }
+
+    /// A compaction (§9). Its read was applied and persisted
+    /// (`reader::apply`), so the read's pin is the base as it is.
+    pub fn for_compaction(next: &Pin) -> WritePins {
+        WritePins {
+            base: next.clone(),
+            bound: None,
+        }
+    }
+
+    /// §8.4 allocation from `first` (`seqfloor + 1`); see `allocate_from`.
+    pub fn allocate(&self, first: u64) -> Result<u64, PinError> {
+        allocate_from(&self.base.sequence_memory, &self.base.pending, first)
+    }
+
+    /// Record the number this write binds, with its ciphertext digest.
+    pub fn bind(&mut self, seq: u64, digest: &str) {
+        self.bound = Some((seq, digest.to_owned()));
+    }
+
+    /// The pin to save before pushing (§8.4 binding timing), or `None` when
+    /// this write allocated nothing and there is nothing to bind.
+    pub fn before_push(&self) -> Option<Pin> {
+        self.bound.as_ref().map(|_| self.bound_pin())
+    }
+
+    /// The pin after the push of `written` (whose ciphertext digest is
+    /// `manifest_digest`) was acknowledged: our binding, and every pending
+    /// number at or below the published `seqfloor`, become CONFIRMED.
+    pub fn on_ack(&self, written: &Manifest, manifest_digest: &str) -> Pin {
+        let mut acked = self.bound_pin();
+        confirm_acked(&mut acked, written.seqfloor);
+        advanced_pin(&acked, written, manifest_digest)
+    }
+
+    /// The pin to save after a definitive rejection (§8.5): the base, which
+    /// withdraws the new binding and only that. `None` when nothing was
+    /// saved before the push, so there is nothing to withdraw.
+    pub fn on_reject(&self) -> Option<Pin> {
+        self.bound.as_ref().map(|_| self.base.clone())
+    }
+
+    fn bound_pin(&self) -> Pin {
+        let mut pin = self.base.clone();
+        if let Some((seq, digest)) = &self.bound {
+            pin.pending.insert(*seq, digest.clone());
+        }
+        pin
+    }
+}
+
+/// The pin after an acknowledged write: the new generation's counter and
+/// twin digest, seqfloor never lower than before, memory as `bound` has it.
+fn advanced_pin(bound: &Pin, manifest: &Manifest, manifest_digest: &str) -> Pin {
+    Pin {
+        vault_id: manifest.vault_id.clone(),
+        counter: manifest.counter,
+        manifest_digest: manifest_digest.to_owned(),
+        format: manifest.format,
+        object_format: manifest.object_format,
+        seqfloor: bound.seqfloor.max(manifest.seqfloor),
+        sequence_memory: bound.sequence_memory.clone(),
+        pending: bound.pending.clone(),
+    }
+}
+
+/// The first pin of a vault this device just initialized, once the push of
+/// `written` was acknowledged. Nothing was saved before that push (§8.4
+/// note 8d): the vault was empty, and a pinned reader refuses an empty vault.
+pub fn initialized_pin(written: &Manifest, manifest_digest: &str, bundle_digest: &str) -> Pin {
+    Pin {
+        vault_id: written.vault_id.clone(),
+        counter: written.counter,
+        manifest_digest: manifest_digest.to_owned(),
+        format: written.format,
+        object_format: written.object_format,
+        seqfloor: written.seqfloor,
+        sequence_memory: [(1, bundle_digest.to_owned())].into_iter().collect(),
+        pending: BTreeMap::new(),
+    }
+}
+
 /// §7.4 (last paragraph): a pinned reader MUST treat an empty vault — no
 /// manifest at all — as an error. Call when the remote presents no
 /// `sealed-manifest.age`. `pinned` is true when this repository holds a
@@ -520,6 +649,33 @@ impl PinStore {
             }
         }
         Ok(pin)
+    }
+
+    /// §7.4 for an EMPTY remote reached through `url`: an error when the URL
+    /// is bound to a vault at all. A binding whose pin file is gone still
+    /// says a vault lived there, so an empty remote is a reset, not first
+    /// contact.
+    pub fn check_empty_at(&self, url: &str) -> Result<(), PinError> {
+        check_empty_vault(self.association(url)?.is_some())
+    }
+
+    /// §7.4: the pin a read through `url` runs its battery against, for a
+    /// manifest that declares `vault_id`. A URL bound to another vault is
+    /// INVALID — checked before any pin is looked up by the manifest's own
+    /// identity, or a substituted vault would simply meet a fresh pin. A URL
+    /// with no binding yet (a new spelling) still meets the pin the
+    /// repository holds for that vault: one pin per vault, shared by every
+    /// URL. `None` is first contact.
+    pub fn pin_for_read(&self, url: &str, vault_id: &str) -> Result<Option<Pin>, PinError> {
+        if let Some(bound) = self.association(url)? {
+            if bound != vault_id {
+                return Err(PinError::VaultMismatch {
+                    pinned: bound,
+                    seen: vault_id.to_owned(),
+                });
+            }
+        }
+        self.load_vault(vault_id)
     }
 
     /// The pin a URL is bound to, read straight from the files (no lock, no

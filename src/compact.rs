@@ -35,12 +35,12 @@ use age::x25519::{Identity, Recipient};
 use crate::bundling::{self, BundleSpec, Stored};
 use crate::manifest::{BundleRecord, Manifest, MAX_COUNTER};
 use crate::names::{BundleName, MAX_SEQ};
-use crate::pinstore;
+use crate::pinstore::WritePins;
 use crate::reader::{self, Inspection, Prepared, RecipientMismatch};
 use crate::vaultrepo::{PushOutcome, VaultRepo};
 use crate::writer::{
-    self, advanced_pin, build_commit, preserved_entries, LegacyCheck, WriteError, WriterConfig,
-    MAX_ATTEMPTS, MAX_INDETERMINATE_ATTEMPTS,
+    self, build_commit, preserved_entries, LegacyCheck, WriteError, WriterConfig, MAX_ATTEMPTS,
+    MAX_INDETERMINATE_ATTEMPTS,
 };
 use crate::FORMAT_VERSION;
 
@@ -155,8 +155,9 @@ pub fn compact(
             refs: Default::default(),
         };
         // §8.4: `apply` already persisted the read's pin, whose pending half
-        // `validate_and_advance` settled against this manifest.
-        let pin_base = p.next_pin().clone();
+        // `validate_and_advance` settled against this manifest. Every pin
+        // decision of this write: see `WritePins`.
+        let mut pins = WritePins::for_compaction(p.next_pin());
         let scratch = vault.scratch_dir()?;
         let mut stored = Stored {
             digest: String::new(),
@@ -173,7 +174,7 @@ pub fn compact(
                 .checked_add(1)
                 .filter(|s| *s <= MAX_SEQ)
                 .ok_or(WriteError::SequenceExhausted)?;
-            let seq = pinstore::allocate_from(&pin_base.sequence_memory, &pin_base.pending, first)?;
+            let seq = pins.allocate(first)?;
             let refs: Vec<(String, String)> =
                 m.refs.iter().map(|(n, s)| (n.clone(), s.clone())).collect();
             let bundle = bundling::create(
@@ -209,6 +210,7 @@ pub fn compact(
             manifest.seqfloor = seq;
             manifest.refs = m.refs.clone();
             manifest.head = m.head.clone();
+            pins.bind(seq, &stored.digest);
             allocated = Some(seq);
         }
 
@@ -218,20 +220,15 @@ pub fn compact(
         let (commit, manifest_digest) =
             build_commit(vault, &manifest, &recipients, &stored, &preserved, None)?;
 
-        let mut pin_bound = pin_base.clone();
-        if let Some(seq) = allocated {
-            pin_bound.pending.insert(seq, stored.digest.clone());
-            vault.save_pin(&pin_bound)?;
+        if let Some(pin) = pins.before_push() {
+            vault.save_pin(&pin)?;
         }
 
         // §9.4: compare-and-swap against T; never a plain force.
         match vault.push_commit(&commit, &branch, Some(&tip))? {
             PushOutcome::Accepted => {
-                let mut acked = pin_bound.clone();
-                pinstore::confirm_acked(&mut acked, manifest.seqfloor);
-                let pin = advanced_pin(&acked, &manifest, &manifest_digest);
                 vault
-                    .save_pin(&pin)
+                    .save_pin(&pins.on_ack(&manifest, &manifest_digest))
                     .map_err(WriteError::AckedButPinNotSaved)?;
                 return Ok(Compaction::Done(CompactReport {
                     counter,
@@ -244,8 +241,8 @@ pub fn compact(
             }
             PushOutcome::Rejected(summary) => {
                 // §8.5 definitive: withdraw the binding before the retry.
-                if allocated.is_some() {
-                    vault.save_pin(&pin_base)?;
+                if let Some(pin) = pins.on_reject() {
+                    vault.save_pin(&pin)?;
                 }
                 last = summary;
             }
