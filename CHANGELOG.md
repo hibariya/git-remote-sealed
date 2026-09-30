@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.2 — a security fix for rejected pushes
+
+A push rejected because the vault changed underneath it no longer
+forgets what its read had confirmed. Before, a host that rewrites its
+branch could use such a rejection to get a forked vault accepted: one
+that binds a sequence number this device had already confirmed to
+different content, which FORMAT.md §7.4 says must be refused. It takes
+a malicious host and a particular race between two devices, but it
+broke a guarantee the format makes, so upgrade if you do not trust
+your host. The fork is now refused with "vault forked: a different
+manifest with the already-seen counter N".
+
+Nothing else changes: vaults, pins and commands are the same as in
+0.3.1, and devices on either version can share a vault. A device still
+on 0.3.1 stays exposed until it upgrades.
+
+The formal models:
+
+- `spec/sealed_v2.qnt` is now `spec/protocol_core.qnt`.
+- A second model, `spec/protocol.qnt`, is written from the code and
+  covers more of it: recipients, URL bindings, and every outcome of a
+  push. It found this bug. `spec/README.md` describes both models;
+  `spec.sh` still checks only `protocol_core.qnt`.
+
 ## 0.3.1 — fixes from a review of 0.3.0
 
 The declared-vs-actual recipient check:
