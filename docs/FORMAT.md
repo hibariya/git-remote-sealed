@@ -46,7 +46,7 @@ Design goals, in priority order:
 ## 2. The formal companion model
 
 The dynamic, safety-critical rules of this format are additionally
-specified as a machine-checked model: `spec/sealed_v2.qnt` (Quint;
+specified as a machine-checked model: `spec/protocol_core.qnt` (Quint;
 verified with Apalache — bounds and results in `spec/README.md`).
 
 **Authority split.** For the rules listed below, the model is normative:

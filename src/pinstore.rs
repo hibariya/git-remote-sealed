@@ -1,7 +1,7 @@
 //! The per-(local repository, vault) pin — §7.4's trust-on-first-use memory —
 //! and the reader acceptance battery, plus the §8.4 write-side allocation
 //! guard. The battery's semantics follow the normative formal model
-//! (`spec/sealed_v2.qnt`: `accepts`, `doRead`, `doPush`).
+//! (`spec/protocol_core.qnt`: `accepts`, `doRead`, `doPush`).
 //!
 //! Storage (`PinStore`), under `<GIT_DIR>/sealed`:
 //!

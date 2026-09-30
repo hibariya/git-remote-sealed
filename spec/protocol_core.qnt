@@ -45,7 +45,7 @@
 //   P6 WITHDRAWN — migration is out of formal scope (owner, 2026-08-23)
 // Unnumbered: inv_seqfloorCoversBundles, inv_p_rooting.
 
-module sealed_v2 {
+module protocol_core {
   const PIN_SEQFLOOR: bool
   const PIN_SEQDIGESTS: bool
   const SHARED_PIN: bool
@@ -531,10 +531,10 @@ module sealed_v2 {
 
 // Review round 1's fork-hop (R2-F2), no pins beyond v1: must violate P3.
 module neg_nopin {
-  import sealed_v2(
+  import protocol_core(
     PIN_SEQFLOOR = false, PIN_SEQDIGESTS = false, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./protocol_core"
 
   // w's push crash-lags its pin; the host then lets w build a second line
   // from genesis that re-allocates seq 2. y accepts the fork.
@@ -554,10 +554,10 @@ module neg_nopin {
 // equal seqfloor and is still accepted. P3 falls. This is the model's
 // finding against plan rev 2 (see README).
 module neg_sfonly {
-  import sealed_v2(
+  import protocol_core(
     PIN_SEQFLOOR = true, PIN_SEQDIGESTS = false, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./protocol_core"
 
   run intermediateHopRejectedTest =
     init
@@ -595,10 +595,10 @@ module neg_sfonly {
 // (`init` pins every slot), after which the host chooses which one it
 // talks to.
 module neg_alias {
-  import sealed_v2(
+  import protocol_core(
     PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = false,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "z"), ALIASES = Set("A", "B")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "z"), ALIASES = Set("A", "B")).* from "./protocol_core"
 
   // The reported bug, verbatim: counter 2 saved through A, counter 3
   // saved through B, then the host replays counter 2 through A — and A's
@@ -631,10 +631,10 @@ module neg_alias {
 // independent writers racing the same allocation from one base; two
 // aliases, so the simulation also drives the vault through both URLs.
 module full {
-  import sealed_v2(
+  import protocol_core(
     PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y", "z"), ALIASES = Set("A", "B")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y", "z"), ALIASES = Set("A", "B")).* from "./protocol_core"
 
   // neg_alias's two traces, with the one shared pin: both refused.
   run sharedPinRefusesRollbackThroughStaleAliasTest =
@@ -779,18 +779,18 @@ module full {
 // alias, without loss of generality: with SHARED_PIN every alias maps to
 // the same slot, so a second alias adds a choice that changes no state.
 module full2 {
-  import sealed_v2(
+  import protocol_core(
     PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = false, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./protocol_core"
 }
 
 // Honest host, CAS compaction: P4 must hold.
 module honest {
-  import sealed_v2(
+  import protocol_core(
     PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = true, CAS_COMPACT = true,
-    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./protocol_core"
 
   run casCompactRetriesTest =
     init
@@ -803,10 +803,10 @@ module honest {
 // Honest host, plain-force compaction (§8 forbids it): the same
 // interleaving now erases an acknowledged push. P4's negative control.
 module neg_force {
-  import sealed_v2(
+  import protocol_core(
     PIN_SEQFLOOR = true, PIN_SEQDIGESTS = true, SHARED_PIN = true,
     HONEST_HOST = true, CAS_COMPACT = false,
-    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./sealed_v2"
+    MAX_GENS = 6, DEVICES = Set("w", "y"), ALIASES = Set("A")).* from "./protocol_core"
 
   run forcePushErasesAckedPushTest =
     init

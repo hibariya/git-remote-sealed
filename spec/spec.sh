@@ -25,8 +25,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# Every test lives in a CONFIGURATION module — each instantiates sealed_v2
-# with a different set of protections switched on. `quint test sealed_v2.qnt`
+# Every test lives in a CONFIGURATION module — each instantiates protocol_core
+# with a different set of protections switched on. `quint test protocol_core.qnt`
 # without --main picks the base module, which has no tests, and exits 0
 # having run nothing. So the loop is not a style choice: collapsing it gives
 # a green run that checked nothing.
@@ -40,12 +40,12 @@ CONFIGS='neg_nopin neg_sfonly neg_alias full honest neg_force'
 CONTROLS='neg_nopin neg_sfonly neg_alias'
 
 echo "== typecheck =="
-quint typecheck sealed_v2.qnt
+quint typecheck protocol_core.qnt
 
 echo "== scenario tests (all $(echo $CONFIGS | wc -w) configurations) =="
 for m in $CONFIGS; do
     echo "-- $m"
-    quint test --main="$m" sealed_v2.qnt
+    quint test --main="$m" protocol_core.qnt
 done
 
 echo "== negative controls: the verifier MUST find these attacks =="
@@ -54,7 +54,7 @@ for m in $CONTROLS; do
     # Inverted on purpose: success here means no violation was found, which
     # is the failure. The attacks are 6 steps, hence --max-steps=6.
     if quint verify --main="$m" --invariant=inv_p3_neverReuse \
-         --max-steps=6 sealed_v2.qnt; then
+         --max-steps=6 protocol_core.qnt; then
         echo "FAIL: $m found no violation — P3 is no longer falsifiable" >&2
         exit 1
     fi
@@ -62,9 +62,9 @@ done
 
 echo "== randomized simulation (3 devices, every invariant incl. P1) =="
 quint run --main=full --invariant=inv_all_malicious \
-    --max-samples=10000 --max-steps=12 sealed_v2.qnt
+    --max-samples=10000 --max-steps=12 protocol_core.qnt
 quint run --main=honest --invariant=inv_all_honest \
-    --max-samples=10000 --max-steps=12 sealed_v2.qnt
+    --max-samples=10000 --max-steps=12 protocol_core.qnt
 
 if [ "$FULL" = "0" ]; then
     echo
@@ -85,9 +85,9 @@ echo "   without finishing. README.md, 'Why these bounds', has the numbers."
 echo "   A pass prints Apalache's 'The outcome is: NoError' — trust that"
 echo "   line, not the exit status."
 quint verify --main=full2 --invariant=inv_core_malicious \
-    --max-steps="$DEPTH" sealed_v2.qnt
+    --max-steps="$DEPTH" protocol_core.qnt
 quint verify --main=honest --invariant=inv_core_honest \
-    --max-steps="$DEPTH" sealed_v2.qnt
+    --max-steps="$DEPTH" protocol_core.qnt
 
 echo
 echo "FULL CHECK PASSED (proofs at depth $DEPTH)"
