@@ -2,27 +2,34 @@
 
 ## 0.3.2 — a security fix for rejected pushes
 
-A push rejected because the vault changed underneath it no longer
-forgets what its read had confirmed. Before, a host that rewrites its
-branch could use such a rejection to get a forked vault accepted: one
-that binds a sequence number this device had already confirmed to
-different content, which FORMAT.md §7.4 says must be refused. It takes
-a malicious host and a particular race between two devices, but it
-broke a guarantee the format makes, so upgrade if you do not trust
-your host. The fork is now refused with "vault forked: a different
-manifest with the already-seen counter N".
+If you do not fully trust your host, please upgrade every device.
 
-Nothing else changes: vaults, pins and commands are the same as in
-0.3.1, and devices on either version can share a vault. A device still
-on 0.3.1 stays exposed until it upgrades.
+A dishonest host could make a device accept a wrong version of the
+vault. The host rejects one of the device's pushes on purpose. After
+that rejection, the device forgot part of what it had already checked.
+The host could then show it a version that disagrees with what it saw
+before, and the device did not notice. (In the format's terms: it
+accepted a manifest that binds an already-confirmed sequence number to
+different content, which FORMAT.md §7.4 forbids.)
+
+This needs a dishonest host and unlucky timing between two devices, so
+it is unlikely. But the format promises to catch it. Now the device
+keeps what it checked, and refuses such a version with the error
+"vault forked: a different manifest with the already-seen counter N".
+
+Nothing else changed. Vaults, the data each device keeps, and the
+commands are the same as in 0.3.1, and devices on 0.3.1 and 0.3.2 can
+use the same vault. A device still on 0.3.1 is not protected until it
+upgrades.
 
 The formal models:
 
-- `spec/sealed_v2.qnt` is now `spec/protocol_core.qnt`.
-- A second model, `spec/protocol.qnt`, is written from the code and
-  covers more of it: recipients, URL bindings, and every outcome of a
-  push. It found this bug. `spec/README.md` describes both models;
-  `spec.sh` still checks only `protocol_core.qnt`.
+- `spec/sealed_v2.qnt` is renamed to `spec/protocol_core.qnt`.
+- A second model, `spec/protocol.qnt`, is written from the code. It
+  covers more of it, including recipients, URL bindings, and every
+  result a push can get. It is what found this bug. `spec/README.md`
+  explains both models; `spec.sh` still checks only
+  `protocol_core.qnt`.
 
 ## 0.3.1 — fixes from a review of 0.3.0
 
