@@ -40,6 +40,39 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  # tests/mbt_pins.rs replays traces of spec/protocol.qnt against the pin
+  # layer with quint-connect, so it needs Rust AND quint. It is #[ignore]d in
+  # the plain `cargo test` above (no quint there) rather than skipped at
+  # runtime: a test that silently passes without quint would look green while
+  # checking nothing. This job is where it runs.
+  mbt:
+    name: Pin layer vs the model (quint-connect)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install -g @informalsystems/quint
+
+      # `quint run` and `quint test` use the Rust evaluator, fetched on first
+      # use into ~/.quint. Its own cache key: the model job's cache also holds
+      # the Apalache distribution, and a shared key would let this job save an
+      # Apalache-less copy that the model job then restores and cannot update.
+      - name: Cache the Quint evaluator
+        uses: actions/cache@v4
+        with:
+          path: ~/.quint
+          key: quint-evaluator-${{ runner.os }}-${{ hashFiles('spec/warm.qnt') }}-v1
+      - name: Warm the evaluator
+        run: quint test spec/warm.qnt
+
+      - run: cargo test --locked --test mbt_pins -- --ignored
+
   model:
     name: Formal model (fast lane)
     runs-on: ubuntu-latest

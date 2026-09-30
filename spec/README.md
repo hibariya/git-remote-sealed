@@ -332,7 +332,8 @@ with a `DeviceId -> Device` map (no Choreo).
   vault identity. Each pin holds counter, twin digest, seqfloor, and CONFIRMED and
   PENDING sequence memory: `pinstore::Pin` minus format/objectformat.
 - State is five variables, each a record: `host`, `devices`, `objs`, `nextId`, `ghost`.
-  `ghost` is bookkeeping for properties and witnesses; the protocol never reads it.
+  `ghost` is bookkeeping for properties, witnesses and the model-based test below
+  (`ghost.call`); the protocol never reads it.
 - **Objects**: commits with parents and ancestor sets. A bundle is `{contents,
   prereqs, recipients}`. A fresh digest per encryption stands for §10's cryptographic
   assumption: the host can replay ciphertext but never forge it.
@@ -571,6 +572,48 @@ protocol.qnt  battery / advance / promoted / stillPending /
 
 When those files change, update this model and re-run the commands above first. If the
 model turns out to be wrong, discuss it before editing it to match the code.
+
+### Model-based test of the pin layer
+
+`tests/mbt_pins.rs` checks the Rust pin layer against this model with
+[quint-connect](https://github.com/quint-co/quint-connect). quint-connect runs
+`quint run` (or a scripted `quint test`) on the model and replays each trace
+through a driver, step by step.
+
+- **What a step says.** Every action sets `ghost.call`, a `PinCall`: which entry
+  point of the pin layer the step used (a read, the start of a push or
+  compaction, a verdict, a forget), the inputs from outside that layer (the
+  generation served, whether its bundles applied, the verdict), and what the model
+  decided (the read's result, the number allocated). Steps that never reach the
+  pin layer are `Noop`.
+- **What the driver does.** It asks the real code the same question: a real
+  `PinStore` in a scratch directory per device, `PinStore::pin_for_read`,
+  `validate_and_advance`, and `WritePins` — the functions `reader.rs`, `writer.rs`
+  and `compact.rs` call. It fails when the code decides differently (another
+  refusal, another number), and after every step it compares each device's URL
+  bindings and pins with the model's `devices`.
+- **What it covers.** 300 malicious-host and 100 honest-host random traces of 30
+  steps, plus eleven scripted scenarios from `protocol_test.qnt` (the forks,
+  rollbacks, twins and the rejected-push trace), which reach refusals random
+  traces rarely build.
+- **Evidence that it bites.** Putting the 0.3.1 rejection behaviour back into
+  `WritePins::on_reject` fails the random run within seconds and
+  `rejected_push_keeps_its_confirmation` deterministically; skipping the
+  PENDING save in `before_push` fails the random run too.
+- **What it does not cover.** Everything outside the pin layer — git, bundles,
+  the host, and the writers' glue that calls `WritePins` — comes from the model as
+  input. Keeping that glue thin is the point of `WritePins`.
+
+It needs `quint` on PATH, so it is `#[ignore]`d in a plain `cargo test` (a test
+that skipped itself would look green while checking nothing). CI's `mbt` job runs
+it:
+
+```sh
+cargo test --locked --test mbt_pins -- --ignored   # QUINT_SEED=<n> to reproduce
+```
+
+Changing `protocol.qnt`'s actions means keeping `ghost.call` in step: a step
+that sets no call replays the previous one's.
 
 ## Honest limits
 

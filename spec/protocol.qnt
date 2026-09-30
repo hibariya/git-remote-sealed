@@ -122,6 +122,30 @@ module protocol {
   type AllocRecord = { dev: DeviceId, vault: VaultId, seq: Seq, digest: Digest, fate: UploadFate }
 
 
+  // What one step asked of the pin layer (src/pinstore.rs), for model-based testing
+  // of that code with quint-connect (tests/mbt_pins.rs). Each variant carries the
+  // inputs that come from outside that layer — the generation served, whether its
+  // bundles applied, the verdict — and what this model decided, which the test
+  // compares with what the code decides. Field names are snake_case because the
+  // test binds them as Rust variables.
+  type ReadResult = ReadOk | ReadErr(Reason)
+  type PinCall =
+    | Begin                                                    // the initial state
+    | Noop                                                     // outside the pin layer
+    | ReadEmpty({ dev: DeviceId, url: Url })                   // refused as EmptyWithPin
+    // A read that went no further than the battery (or apply, when `applied` is
+    // false); a fetch whose read applied saves its pin.
+    | Read({ dev: DeviceId, url: Url, served_id: GenId, served: Gen,
+             result: ReadResult, applied: bool })
+    // Vault initialization: nothing is saved before the push.
+    | InitStart({ dev: DeviceId, url: Url, digest: Digest, written_id: GenId, written: Gen })
+    // Step 1 of a push or a compaction. `alloc`: the number allocated, 0 for none,
+    // -1 when allocation refused the base (AllocationCollision).
+    | WriteStart({ dev: DeviceId, url: Url, compaction: bool, served_id: GenId, served: Gen,
+                   alloc: Seq, digest: Digest, written_id: GenId, written: Gen })
+    | Deliver({ dev: DeviceId, verdict: Verdict })               // the verdict the writer acts on
+    | Forget({ dev: DeviceId, url: Url })
+
   // A generation a device has pinned (the pin's twin witness pointed at it).
   type Seen = { vault: VaultId, gen: GenId, counter: int }
 
@@ -133,6 +157,7 @@ module protocol {
     seen: DeviceId -> Set[Seen],                    // generations each device accepted (applied or acked)
     memoryLog: DeviceId -> Set[(VaultId, Seq, Digest)], // every CONFIRMED binding ever held
     rolledBack: bool,                               // a device accepted an older generation
+    call: PinCall,                                  // this step, as the pin layer sees it
   }
 
   // The result of §6 steps 1-4 (reader::inspect).
@@ -400,14 +425,25 @@ module protocol {
     nextId' = 1,
     ghost' = { lastEvent: NoEvent, acked: Set(), allocs: Set(),
                seen: DEVICES.mapBy(_ => Set()), memoryLog: DEVICES.mapBy(_ => Set()),
-               rolledBack: false },
+               rolledBack: false, call: Begin },
   }
 
   // A command that stops with an error: nothing changes but what the user is told.
-  action refuse(dev: DeviceId, r: Reason): bool = all {
+  action refuse(dev: DeviceId, r: Reason, call: PinCall): bool = all {
     host' = host, devices' = devices, objs' = objs, nextId' = nextId,
-    ghost' = { ...ghost, lastEvent: Refused({ dev: dev, reason: r }) },
+    ghost' = { ...ghost, lastEvent: Refused({ dev: dev, reason: r }), call: call },
   }
+
+  // The pin layer's view of a read refused by `inspect`.
+  def refusedRead(dev: DeviceId, url: Url, r: Reason): PinCall =
+    if (r == EmptyWithPin) ReadEmpty({ dev: dev, url: url })
+    else if (r == CannotDecrypt) Noop
+    else Read({ dev: dev, url: url, served_id: host.tip, served: host.gens.get(host.tip),
+                result: ReadErr(r), applied: false })
+
+  // A read that passed the battery; `applied` when its pin was saved.
+  pure def passedRead(dev: DeviceId, url: Url, genId: GenId, g: Gen, applied: bool): PinCall =
+    Read({ dev: dev, url: url, served_id: genId, served: g, result: ReadOk, applied: applied })
 
   // A branch that cannot fire (the command has nothing to do and writes nothing).
   action disabled: bool = all {
@@ -428,13 +464,14 @@ module protocol {
       objs' = { ...objs, parents: objs.parents.put(c, ps),
                 history: objs.history.put(c, reach(objs.history, ps).union(Set(c))) },
       nextId' = nextId + 1,
-      ghost' = ghost,
+      ghost' = { ...ghost, call: Noop },
     }
   }
 
   // Step 1 of a write, shared by push and compaction: register the new bundle (if
   // any), save the PENDING binding when there is one, and go in flight.
-  action send(dev: DeviceId, d: Device, up: Upload, info: BundleInfo, digest: Digest, ids: int): bool = {
+  action send(dev: DeviceId, d: Device, up: Upload, info: BundleInfo, digest: Digest, ids: int,
+              call: PinCall): bool = {
     val saved = up.alloc > 0 and up.onReject != KeepPin
     all {
       host' = host,
@@ -445,6 +482,7 @@ module protocol {
         val g1 = if (saved) logPin(ghost, dev, up.bound, false) else ghost
         { ...g1,
           lastEvent: Sent({ dev: dev, gen: up.genId, kind: up.gen.kind }),
+          call: call,
           allocs: if (up.alloc > 0)
                     g1.allocs.union(Set({ dev: dev, vault: up.gen.vault, seq: up.alloc, digest: digest, fate: InFlight }))
                   else g1.allocs }
@@ -464,7 +502,8 @@ module protocol {
     val bound = { vault: vault, counter: 1, digest: genId, seqfloor: 1,
                   confirmed: Map(1 -> digest), pending: Map() }
     send(dev, d, { url: url, genId: genId, gen: gen, alloc: 1, bound: bound, onReject: KeepPin },
-         bundleFor(objs, Set(c), Set(), Set(dev)), digest, 3)
+         bundleFor(objs, Set(c), Set(), Set(dev)), digest, 3,
+         InitStart({ dev: dev, url: url, digest: digest, written_id: genId, written: gen }))
   }
 
   // §8 steps 2-4 against an existing vault (writer::attempt_incremental).
@@ -481,9 +520,11 @@ module protocol {
                  pending: stillPending(pendingOf(prev), g) }
     val seq = if (needsBundle) allocate(base.confirmed, base.pending, g.seqfloor + 1) else Some(0)
     match checkUpdate(objs, g.refs, d.repo, ref, nv, force) {
-      | Some(r) => if (r == NothingToDo) disabled else refuse(dev, r)
+      | Some(r) => if (r == NothingToDo) disabled else refuse(dev, r, passedRead(dev, url, genId, g, false))
       | None => match seq {
-        | None => refuse(dev, AllocationCollision)
+        | None => refuse(dev, AllocationCollision,
+                         WriteStart({ dev: dev, url: url, compaction: false, served_id: genId, served: g,
+                                      alloc: -1, digest: 0, written_id: 0, written: g }))
         | Some(s) => {
           val digest = nextId
           val newId = if (needsBundle) nextId + 1 else nextId
@@ -497,7 +538,9 @@ module protocol {
           val bound = if (needsBundle) { ...base, pending: base.pending.put(s, digest) } else base
           send(dev, d, { url: url, genId: newId, gen: gen, alloc: s, bound: bound,
                          onReject: if (needsBundle) SavePin(base) else KeepPin },
-               info, digest, if (needsBundle) 2 else 1)
+               info, digest, if (needsBundle) 2 else 1,
+               WriteStart({ dev: dev, url: url, compaction: false, served_id: genId, served: g,
+                            alloc: s, digest: if (needsBundle) digest else 0, written_id: newId, written: gen }))
         }
       }
     }
@@ -513,7 +556,7 @@ module protocol {
           | Some(c) => initWrite(dev, d, url, ref, c)
           | None => disabled   // deleting on an empty vault writes nothing
         }
-        | IRefused(r) => refuse(dev, r)
+        | IRefused(r) => refuse(dev, r, refusedRead(dev, url, r))
         | IVault(v) => incrementalWrite(dev, d, url, ref, nv, force, v.genId, v.gen, v.prev, v.nextPin)
       },
     }
@@ -536,6 +579,7 @@ module protocol {
         val ackPin = advancedPin(confirmAcked(up.bound, up.gen.seqfloor), up.gen, up.genId)
         val fated = { ...ghost,
                       lastEvent: Outcome({ dev: dev, gen: up.genId, verdict: verdict, landed: landed }),
+                      call: Deliver({ dev: dev, verdict: believed }),
                       allocs: ghost.allocs.map(a =>
                         if (a.dev == dev and a.seq == up.alloc and a.vault == up.gen.vault and a.fate == InFlight)
                           { ...a, fate: if (landed) Landed else NotLanded }
@@ -574,15 +618,16 @@ module protocol {
       d.op == Idle,
       match inspect(dev, d, url, host) {
         | IEmpty => disabled   // an empty vault reads as no refs: nothing changes
-        | IRefused(r) => refuse(dev, r)
+        | IRefused(r) => refuse(dev, r, refusedRead(dev, url, r))
         | IVault(v) => match applyGen(objs, v.gen, confirmedOf(v.prev), d.repo, dev) {
-          | ApplyFail(r) => refuse(dev, r)
+          | ApplyFail(r) => refuse(dev, r, passedRead(dev, url, v.genId, v.gen, false))
           | ApplyOk(repo) => all {
             host' = host,
             devices' = devices.put(dev, withPin({ ...d, repo: repo }, url, v.nextPin)),
             objs' = objs,
             nextId' = nextId,
-            ghost' = { ...logPin(ghost, dev, v.nextPin, true), lastEvent: Accepted({ dev: dev, gen: v.genId }) },
+            ghost' = { ...logPin(ghost, dev, v.nextPin, true), lastEvent: Accepted({ dev: dev, gen: v.genId }),
+                       call: passedRead(dev, url, v.genId, v.gen, true) },
           }
         }
       },
@@ -599,13 +644,13 @@ module protocol {
       d.op == Idle,
       match inspect(dev, d, url, host) {
         | IEmpty => disabled   // `compact` on an empty vault: an error, nothing to see
-        | IRefused(r) => refuse(dev, r)
+        | IRefused(r) => refuse(dev, r, refusedRead(dev, url, r))
         | IVault(v) => match newSet(v.gen.recipients, change) {
           | None => disabled   // the change is already in effect: nothing written
           | Some(newRecipients) =>
-            if (newRecipients == Set()) refuse(dev, EmptySet)
+            if (newRecipients == Set()) refuse(dev, EmptySet, passedRead(dev, url, v.genId, v.gen, false))
             else match applyGen(objs, v.gen, confirmedOf(v.prev), d.repo, dev) {
-              | ApplyFail(r) => refuse(dev, r)
+              | ApplyFail(r) => refuse(dev, r, passedRead(dev, url, v.genId, v.gen, false))
               | ApplyOk(repo) => compactWrite(dev, withPin({ ...d, repo: repo }, url, v.nextPin),
                                               url, change, newRecipients, v.genId, v.gen, v.nextPin)
             }
@@ -624,7 +669,9 @@ module protocol {
       | None => all {
         // allocation refused after the read was applied and persisted
         host' = host, devices' = devices.put(dev, d), objs' = objs, nextId' = nextId,
-        ghost' = { ...readGhost, lastEvent: Refused({ dev: dev, reason: AllocationCollision }) },
+        ghost' = { ...readGhost, lastEvent: Refused({ dev: dev, reason: AllocationCollision }),
+                   call: WriteStart({ dev: dev, url: url, compaction: true, served_id: genId, served: g,
+                                      alloc: -1, digest: 0, written_id: 0, written: g }) },
       }
       | Some(s) => {
         val digest = nextId
@@ -655,6 +702,8 @@ module protocol {
             val g1 = if (s > 0) logPin(readGhost, dev, bound, false) else readGhost
             { ...g1,
               lastEvent: Sent({ dev: dev, gen: newId, kind: gen.kind }),
+              call: WriteStart({ dev: dev, url: url, compaction: true, served_id: genId, served: g,
+                                 alloc: s, digest: if (s > 0) digest else 0, written_id: newId, written: gen }),
               allocs: if (s > 0)
                         g1.allocs.union(Set({ dev: dev, vault: g.vault, seq: s, digest: digest, fate: InFlight }))
                       else g1.allocs }
@@ -682,7 +731,7 @@ module protocol {
       objs' = objs,
       nextId' = nextId,
       ghost' = { ...(if (hasPinFor(after, vault)) ghost else unlog(ghost, dev, vault)),
-                 lastEvent: Forgot({ dev: dev, url: url }) },
+                 lastEvent: Forgot({ dev: dev, url: url }), call: Forget({ dev: dev, url: url }) },
     }
   }
 
@@ -695,7 +744,7 @@ module protocol {
     t != host.tip,
     host' = { ...host, tip: t },
     devices' = devices, objs' = objs, nextId' = nextId,
-    ghost' = { ...ghost, lastEvent: Rewound({ tip: t }) },
+    ghost' = { ...ghost, lastEvent: Rewound({ tip: t }), call: Noop },
   }
 
   action step = {

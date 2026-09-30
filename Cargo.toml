@@ -20,3 +20,11 @@ path = "src/main.rs"
 [dependencies]
 age = "=0.11.5"
 sha2 = "=0.10.9"
+
+# Tests only, never in the binary: tests/mbt_pins.rs replays traces of
+# spec/protocol.qnt against the pin layer. quint-connect's `switch!` expands
+# to `serde::` and `anyhow::` paths, so the test crate names both.
+[dev-dependencies]
+anyhow = "1"
+quint-connect = "0.1.2"
+serde = { version = "1", features = ["derive"] }

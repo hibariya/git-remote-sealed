@@ -148,7 +148,14 @@ This implementation is written **from the spec alone**. If you port a fix from a
 Run the tests the way CI does, without a host toolchain:
 
 ```shell
-podman compose run --rm check      # fmt, clippy, and every test
+podman compose run --rm check      # fmt, clippy, and the tests
+```
+
+One test also needs `quint` on the host, so the command above skips it: the
+model-based test of the pin layer (see [spec/README.md](spec/README.md)).
+
+```shell
+cargo test --locked --test mbt_pins -- --ignored
 ```
 
 To verify the Quint specs, run:
