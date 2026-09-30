@@ -1034,9 +1034,14 @@ impl Ctx<'_> {
             }
             PushOutcome::Rejected(summary) => {
                 // §8.5 definitive: a ref-level rejection proves the write did
-                // not land, so the binding is withdrawn before the retry.
+                // not land, so the binding is withdrawn before the retry —
+                // that binding only. `pin_base` is this read's pin: going back
+                // to the pin from before the read would also drop what the
+                // read confirmed (a pending number the base binds to our own
+                // ciphertext), and the retry could then accept a manifest
+                // that re-binds it. compact.rs does the same.
                 if allocated.is_some() {
-                    restore_pin(self.vault, p.prev_pin(), &m.vault_id)?;
+                    self.vault.save_pin(&pin_base)?;
                 }
                 Ok(Attempt::Rejected(summary))
             }
@@ -1220,21 +1225,6 @@ pub(crate) fn advanced_pin(bound: &Pin, manifest: &Manifest, manifest_digest: &s
         sequence_memory: bound.sequence_memory.clone(),
         pending: bound.pending.clone(),
     }
-}
-
-/// Put the vault's pin back to what the attempt started from. `prev ==
-/// None` means the repository held no pin for the vault at all (through
-/// any URL), so the pending binding was its first record: remove it.
-pub(crate) fn restore_pin(
-    vault: &VaultRepo,
-    prev: Option<&Pin>,
-    vault_id: &str,
-) -> Result<(), WriteError> {
-    match prev {
-        Some(pin) => vault.save_pin(pin)?,
-        None => vault.pins()?.remove_vault(vault_id)?,
-    }
-    Ok(())
 }
 
 /// §7.2: a random vault identity, at least 128 bits, lowercase hex. Drawn

@@ -672,6 +672,91 @@ fn a_lost_acknowledgement_is_settled_by_the_next_read() {
 }
 
 #[test]
+fn a_rejected_push_keeps_what_its_read_confirmed() {
+    // Found by the Quint model (spec/protocol.qnt,
+    // `rejectedPushForgetsItsConfirmationTest`). A push's read can confirm
+    // a PENDING number: the base binds it to our own ciphertext, so that
+    // write landed. A definitive rejection withdraws only the push's NEW
+    // binding. Going back to the pin from before the read threw the
+    // confirmation away too, and the retry then accepted a twin that
+    // re-binds the number.
+    let lab = Lab::new("w-reject-keeps");
+    let src = lab.source("src");
+    src.commit_file("note.md", "one\n", "first");
+    lab.push_ok(&src.dir, &["main"]);
+    let gen1 = lab.remote.tip("main");
+    let b = lab.clone_ok("b");
+
+    // Our push of sequence 2 lands, but the acknowledgement is lost: the
+    // pin still says generation 1 and holds sequence 2 only as PENDING.
+    src.commit_file("note.md", "two\n", "second");
+    lab.push_ok(&src.dir, &["main"]);
+    let ours = lab.remote.tip("main");
+    let our_digest = lab.manifest().bundles[&2].digest.clone();
+    let mut pin = pinstore::load(&pin_dir(&src.dir))
+        .expect("readable")
+        .expect("pinned");
+    pin.counter = 1;
+    pin.seqfloor = 1;
+    pin.sequence_memory.remove(&2);
+    pin.pending.insert(2, our_digest.clone());
+    pinstore::save(&pin_dir(&src.dir), &pin).expect("save");
+
+    // B never saw our generation and takes sequence 2 on generation 1:
+    // a twin of ours (same counter) that binds 2 to other ciphertext.
+    lab.remote.set_branch("main", &gen1);
+    git(&b, &["checkout", "-q", "-b", "b"]);
+    fs::write(b.join("b.md"), "b").expect("write");
+    git(&b, &["add", "."]);
+    git(&b, &["commit", "-q", "-m", "b"]);
+    lab.push_ok(&b, &["b"]);
+    let twin = lab.remote.tip("main");
+    let m = lab.manifest();
+    assert_eq!(m.counter, 2);
+    assert_ne!(m.bundles[&2].digest, our_digest);
+
+    // The host serves our generation: the push's read confirms sequence 2.
+    // Then it moves the branch to the twin, so the push is rejected.
+    lab.remote.set_branch("main", &ours);
+    src.commit_file("note.md", "three\n", "third");
+    let mut h = lab.helper(&src.dir);
+    h.send("capabilities\nlist for-push\n");
+    h.read_block();
+    h.read_block();
+    lab.remote.set_branch("main", &twin);
+    h.send("push refs/heads/main:refs/heads/main\n\n");
+    let status = h.read_block();
+    let (_, stderr) = h.finish();
+
+    // The retry reads the twin and must refuse it.
+    assert!(
+        status
+            .iter()
+            .any(|l| l.starts_with("error refs/heads/main")),
+        "status: {status:?}"
+    );
+    assert!(
+        stderr.contains("vault forked: a different manifest with the already-seen counter 2"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        lab.remote.tip("main"),
+        twin,
+        "nothing was pushed on the twin"
+    );
+    let pin = pinstore::load(&pin_dir(&src.dir))
+        .expect("readable")
+        .expect("pinned");
+    assert_eq!(pin.counter, 2);
+    assert_eq!(
+        pin.sequence_memory.get(&2),
+        Some(&our_digest),
+        "the confirmation survives the rejection"
+    );
+    assert!(pin.pending.is_empty(), "pending: {:?}", pin.pending);
+}
+
+#[test]
 fn an_interrupted_compaction_skips_its_pending_number() {
     // H1 where it hurts most: a compaction is one big upload, and the
     // v1 -> v2 migration IS a compaction. §4.1 forbids re-publishing the

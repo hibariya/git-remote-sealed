@@ -543,8 +543,7 @@ impl PinStore {
         save(&self.vault_dir(&pin.vault_id), pin)
     }
 
-    /// Delete a vault's pin file (a writer withdrawing a first-contact
-    /// binding after a definitive rejection). Absence is not an error.
+    /// Delete a vault's pin file. Absence is not an error.
     pub fn remove_vault(&self, vault_id: &str) -> Result<(), PinError> {
         remove(&self.vault_dir(vault_id))
     }
