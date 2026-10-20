@@ -6,6 +6,10 @@ Your repository stays normal on your machine. The remote (the "vault")
 stores only encrypted files. The host (GitHub, or any other git server)
 cannot see file contents, file names, branch names, or history.
 
+[![Watch the 51-second demo](docs/demo/preview.jpg)](docs/demo/git-remote-sealed.mp4)
+
+[Watch the demo](docs/demo/git-remote-sealed.mp4) · 51 seconds, with captions and no audio.
+
 ## Getting started
 
 Install the helper (see [Installation](#installation)), make a key, and
