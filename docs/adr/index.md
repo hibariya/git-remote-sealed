@@ -35,4 +35,4 @@ We ...
 
 ## Decisions
 
-(None yet.)
+- [2026-10-24](2026-10-24-mirror-gc-on-replaced-generation.md) The mirror is gc'd when a compaction replaces the vault's generation — Accepted

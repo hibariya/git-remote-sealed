@@ -230,6 +230,7 @@ pub fn compact(
                 vault
                     .save_pin(&pins.on_ack(&manifest, &manifest_digest))
                     .map_err(WriteError::AckedButPinNotSaved)?;
+                vault.adopt_compaction(&commit);
                 return Ok(Compaction::Done(CompactReport {
                     counter,
                     allocated,

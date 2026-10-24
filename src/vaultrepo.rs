@@ -348,6 +348,7 @@ impl VaultRepo {
                 what: "ls-remote".into(),
                 detail: format!("no object id listed for {branch}"),
             })?;
+        let previous = self.mirror_tip();
         let peeled = format!("{tip}^{{commit}}");
         if object_exists(&self.mirror, &peeled)? {
             self.git(
@@ -373,6 +374,7 @@ impl VaultRepo {
             .git(&["rev-parse", "--verify", MIRROR_REF], "rev-parse")?
             .trim()
             .to_owned();
+        self.drop_replaced_generation(previous.as_deref(), &commit);
 
         // §6.1: the *committed* tree. `ls-tree` of the fetched commit reads
         // only tracked content; -z so host-chosen names (the host controls
@@ -389,6 +391,75 @@ impl VaultRepo {
             files,
             entries,
         }))
+    }
+
+    /// An accepted compaction push IS the remote state (§6.1), so the mirror
+    /// moves to it now and drops the generation it replaced, rather than
+    /// waiting for the next fetch to notice. Best effort: the compaction
+    /// already succeeded, and the next fetch does the same reset.
+    pub fn adopt_compaction(&self, commit: &str) {
+        let previous = self.mirror_tip();
+        match self.git(
+            &["update-ref", "--no-deref", MIRROR_REF, commit],
+            "update-ref",
+        ) {
+            Ok(_) => self.drop_replaced_generation(previous.as_deref(), commit),
+            Err(e) => eprintln!("git-remote-sealed: warning: {e}"),
+        }
+    }
+
+    /// The commit the mirror ref points at; `None` before the first fetch.
+    fn mirror_tip(&self) -> Option<String> {
+        if !self.mirror_exists() {
+            return None;
+        }
+        let spec = format!("{MIRROR_REF}^{{commit}}");
+        let out = self
+            .git_command(&["rev-parse", "--verify", "--quiet", &spec])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    /// When the mirror moved from `previous` to a `current` whose
+    /// history does not contain it, a compaction (here or on another device)
+    /// replaced the whole generation. Its ciphertext never deltas, so it
+    /// would sit in the mirror forever at full size; gc it now. Ordinary
+    /// pushes only append, so they never trigger this. Safe under the §6.1
+    /// lock: the mirror holds nothing but what the ref reaches. Never fails
+    /// the operation; a gc that cannot run only costs disk.
+    /// (docs/adr/2026-10-24-mirror-gc-on-replaced-generation.md)
+    fn drop_replaced_generation(&self, previous: Option<&str>, current: &str) {
+        let Some(previous) = previous else { return };
+        if previous == current {
+            return;
+        }
+        // Exit 1 = not an ancestor. 0 is the same generation; anything else
+        // (e.g. the old commit is already gone) is no evidence either way.
+        let replaced = self
+            .git_command(&["merge-base", "--is-ancestor", previous, current])
+            .output()
+            .is_ok_and(|o| o.status.code() == Some(1));
+        if !replaced {
+            return;
+        }
+        // --prune=now also keeps repack from loosening the old generation
+        // into loose files first; reflogs (if a user config enables them on
+        // bare repos) would otherwise keep it reachable.
+        let gc = [
+            "-c",
+            "gc.reflogExpire=now",
+            "-c",
+            "gc.reflogExpireUnreachable=now",
+            "gc",
+            "--quiet",
+            "--prune=now",
+        ];
+        if let Err(e) = self.git(&gc, "gc") {
+            eprintln!("git-remote-sealed: warning: could not clean up the local vault mirror: {e}");
+        }
     }
 
     // --- write side (§8/§9): plumbing only, never a worktree ---

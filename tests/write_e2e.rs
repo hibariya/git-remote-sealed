@@ -1135,3 +1135,78 @@ fn pushes_through_two_aliases_share_one_pin() {
     );
     assert_eq!(lab.remote.tip("main"), gen1, "nothing was pushed");
 }
+
+/// Objects in the repo's vault mirror that its ref no longer reaches.
+fn dead_mirror_objects(repo: &Path) -> usize {
+    let mirror = state_dir(repo).join("mirror.git");
+    let all = git(
+        &mirror,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ],
+    );
+    let live = git(&mirror, &["rev-list", "--objects", "--all"]);
+    all.lines().count() - live.lines().count()
+}
+
+#[test]
+fn a_compaction_here_drops_the_old_generation_from_the_mirror() {
+    // The replaced generation would otherwise stay at full size
+    // (docs/adr/2026-10-24-mirror-gc-on-replaced-generation.md).
+    let lab = Lab::new("w-mirror-gc-local");
+    let src = lab.source("src");
+    src.commit_file("note.md", "one\n", "first");
+    lab.push_ok(&src.dir, &["main"]);
+    src.commit_file("note.md", "two\n", "second");
+    lab.push_ok(&src.dir, &["main"]);
+
+    assert_ok(
+        &cli(&src.dir, &lab.id_file, &["compact", "origin"]),
+        "compact",
+    );
+    assert_eq!(dead_mirror_objects(&src.dir), 0);
+    assert_ok(
+        &cli(&src.dir, &lab.id_file, &["compact", "origin"]),
+        "compact again",
+    );
+    assert_eq!(dead_mirror_objects(&src.dir), 0);
+
+    // The mirror still serves both directions.
+    let c3 = src.commit_file("note.md", "three\n", "third");
+    lab.push_ok(&src.dir, &["main"]);
+    let clone = lab.clone_ok("clone");
+    assert_eq!(rev(&clone, "refs/heads/main"), c3);
+}
+
+#[test]
+fn a_compaction_elsewhere_is_dropped_on_fetch_but_a_push_is_not() {
+    let lab = Lab::new("w-mirror-gc-remote");
+    let src = lab.source("src");
+    src.commit_file("note.md", "one\n", "first");
+    lab.push_ok(&src.dir, &["main"]);
+    let other = lab.clone_ok("other");
+
+    // An ordinary push only appends (the old manifest stays reachable
+    // through history), so its fetch must not gc: the few objects it
+    // brought stay loose.
+    let c2 = src.commit_file("note.md", "two\n", "second");
+    lab.push_ok(&src.dir, &["main"]);
+    assert_ok(&lab.fetch(&other), "fetch after push");
+    assert_eq!(dead_mirror_objects(&other), 0);
+    let counts = git(
+        &state_dir(&other).join("mirror.git"),
+        &["count-objects", "-v"],
+    );
+    assert!(!counts.contains("\ncount: 0\n"), "{counts}");
+
+    // Another device's compaction replaces the generation: dropped on fetch.
+    assert_ok(
+        &cli(&src.dir, &lab.id_file, &["compact", "origin"]),
+        "compact",
+    );
+    assert_ok(&lab.fetch(&other), "fetch after compaction");
+    assert_eq!(dead_mirror_objects(&other), 0);
+    assert_eq!(rev(&other, "refs/remotes/origin/main"), c2);
+}

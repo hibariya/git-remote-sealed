@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+The local copy of the vault (`.git/sealed/urls/*/mirror.git`) no longer
+keeps every old generation. A compaction, `enroll`, or `revoke` now cleans
+it up right away, and when another device did one, the next fetch or
+push does. Before, each of those left a full old copy of the repository
+on disk forever.
+See [the decision record](docs/adr/2026-10-24-mirror-gc-on-replaced-generation.md).
+
 ## 0.3.2 — a security fix for rejected pushes
 
 If you do not fully trust your host, please upgrade every device.
