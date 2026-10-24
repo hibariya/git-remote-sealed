@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 — old copies of the vault no longer pile up on disk
 
 The local copy of the vault (`.git/sealed/urls/*/mirror.git`) no longer
 keeps every old generation. A compaction, `enroll`, or `revoke` now cleans
@@ -8,6 +8,11 @@ it up right away, and when another device did one, the next fetch or
 push does. Before, each of those left a full old copy of the repository
 on disk forever.
 See [the decision record](docs/adr/2026-10-24-mirror-gc-on-replaced-generation.md).
+
+Nothing else changed. Vaults, the data each device keeps, and the
+commands are the same as in 0.3.2, and devices on 0.3.2 and 0.3.3 can
+use the same vault. A device that already holds old copies is cleaned at
+the next compaction.
 
 ## 0.3.2 — a security fix for rejected pushes
 
