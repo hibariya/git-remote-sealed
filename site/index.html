@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="A git remote helper that encrypts your whole repository with age before it reaches the remote.">
+<title>git-remote-sealed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,600;1,400&amp;display=swap">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='8' y='8' width='48' height='48' rx='4' fill='%231f3a15'/%3E%3Crect x='4' y='25' width='56' height='14' transform='rotate(-8 32 32)' fill='%23c4c7cc'/%3E%3C/svg%3E">
+<style>
+html, body { margin: 0; background: oklch(0.97 0.003 100); }
+a { color: oklch(0.32 0.08 138); text-underline-offset: 3px; }
+a:hover { color: oklch(0.45 0.13 30); }
+a:focus-visible { outline: 2px solid oklch(0.45 0.13 30); outline-offset: 2px; }
+::selection { background: oklch(0.88 0.06 138); }
+@keyframes cipherIn { 0% { clip-path: inset(0 0 100% 0); } 96% { clip-path: inset(0 0 calc(100% - 100vh) 0); } 100% { clip-path: inset(0 0 0 0); } }
+@keyframes cipherFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes tapeIn { 0% { clip-path: inset(-10% 100% -10% 0); } 100% { clip-path: inset(-10% 0 -10% 0); } }
+@media (prefers-reduced-motion: reduce) { [data-anim] { animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="root" style="position: relative; min-height: 100vh; overflow: hidden; display: flow-root; font-family: 'IBM Plex Mono', ui-monospace, monospace;">
+    <div aria-hidden="true" style="position: absolute; inset: -4px; font-size: 13px; line-height: 20px; color: oklch(0.82 0.01 138); word-break: break-all; user-select: none; pointer-events: none; animation: cipherFade 0.3s ease-out both;" data-anim="" id="cipher"></div>
+  <main style="position: relative; box-sizing: border-box; max-width: 920px; margin: clamp(16px, 7vw, 112px) clamp(12px, 3vw, 24px) clamp(16px, 7vw, 112px) clamp(12px, 9vw, 128px); background: oklch(0.96 0.012 85); color: oklch(0.22 0.01 85); font-size: clamp(14px, 1.6vw, 15px); line-height: 1.75; padding: clamp(24px, 5vw, 56px) clamp(20px, 6vw, 72px) clamp(28px, 6vw, 72px); box-shadow: 0 0 0 1px oklch(0.85 0.01 138), 0 24px 60px oklch(0.3 0.03 138 / 0.12);">
+    <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 28px;">
+      <svg viewBox="0 0 240 64" width="180" height="48" role="img" aria-label="sealed::" data-anim="" style="flex: 0 0 auto; animation: tapeIn 0.5s cubic-bezier(0.35, 0.6, 0.2, 1) 0.35s both;"><polygon transform="rotate(-2 120 32)" points="12,10 228,10 234,15 228,20 234,26 228,32 234,38 228,44 234,49 228,54 12,54 6,49 12,44 6,38 12,32 6,26 12,20 6,15" fill="oklch(0.74 0.012 240)"></polygon><text x="120" y="41" text-anchor="middle" transform="rotate(-2 120 32)" font-family="IBM Plex Mono, monospace" font-weight="600" font-size="26" fill="oklch(0.24 0.04 138)">sealed::</text></svg>
+      <div style="display: flex; flex-direction: column; gap: 2px;">
+        <span style="font-weight: 600; font-size: 16px;">git-remote-sealed</span>
+        <span style="color: oklch(0.50 0.02 138); font-size: 12px; line-height: 1.5;">$ age -d -i key.txt git-remote-sealed.1.age | man -l -</span>
+      </div>
+    </div>
+    <header style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 24px; color: oklch(0.45 0.01 85);"><span>GIT-REMOTE-SEALED(1)</span><span>Git Manual</span><span>GIT-REMOTE-SEALED(1)</span></header>
+    <div style="display: flex; flex-direction: column; gap: 36px; margin-top: 48px;">
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">NAME</h2>
+        <h1 style="font: inherit; margin: 0; padding-left: clamp(0px, 5vw, 56px);">git-remote-sealed — encrypt your whole repository with age before it reaches the remote</h1>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">SYNOPSIS</h2>
+        <div style="padding-left: clamp(0px, 5vw, 56px);">git remote add <em>name</em> <span style="color: oklch(0.45 0.13 30); font-weight: 600;">sealed::</span><em>url</em><br>git-remote-sealed [info | enroll | revoke | compact | upgrade | forget]</div>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">DESCRIPTION</h2>
+        <p style="margin: 0; padding-left: clamp(0px, 5vw, 56px); max-width: 68ch;">Your repository stays normal on your machine. The remote (the "vault") stores only encrypted files. The host (GitHub, or any other git server) cannot see file contents, file names, branch names, or history.</p>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">DEMO</h2>
+        <div style="padding-left: clamp(0px, 5vw, 56px); display: flex; flex-direction: column; gap: 8px;">
+          <video controls="" playsinline="" preload="metadata" src="./git-remote-sealed.mp4" style="display: block; width: 100%; aspect-ratio: 16 / 9; background: oklch(0.22 0.03 138);"></video>
+          <span style="color: oklch(0.45 0.01 85);">A 51-second demo, with captions and no audio. <a href="https://github.com/hibariya/git-remote-sealed#readme">Watch on GitHub</a></span>
+        </div>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">EXAMPLES</h2>
+        <pre style="margin: 0; padding-left: clamp(0px, 5vw, 56px); font: inherit; white-space: pre-wrap; word-break: break-word; color: oklch(0.32 0.06 138);"><span style="color: oklch(0.50 0.02 138);"># make a key pair for this device</span>
+$ age-keygen -o ~/.config/sealed-key.txt
+$ cd my-secret-repo
+$ git config sealed.identity ~/.config/sealed-key.txt
+$ git remote add origin sealed::git@github.com:me/my-secret-repo.git
+$ git push -u origin main</pre>
+        <p style="margin: 12px 0 0; padding-left: clamp(0px, 5vw, 56px); max-width: 68ch;">The first push creates the vault, encrypted to this device's key only. The vault itself remembers which keys can read it. There is nothing else to configure.</p>
+        <p style="margin: 12px 0 0; padding-left: clamp(0px, 5vw, 56px); max-width: 68ch;">Next, add a recovery key. If you lose every key, the data is gone.</p>
+        <pre style="margin: 12px 0 0; padding-left: clamp(0px, 5vw, 56px); font: inherit; white-space: pre-wrap; word-break: break-word; color: oklch(0.32 0.06 138);">$ age-keygen -o recovery-key.txt
+$ git-remote-sealed enroll age1...</pre>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">COMMANDS</h2>
+        <div style="padding-left: clamp(0px, 5vw, 56px); display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; flex-wrap: wrap; gap: 0 24px;"><span style="font-weight: 600; flex: 0 0 200px;">info</span><span style="flex: 1 1 300px;">This device's key, what it remembers about the vault, and the keys the vault is encrypted to.</span></div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0 24px;"><span style="font-weight: 600; flex: 0 0 200px;">enroll <em style="font-weight: 400;">age1...</em></span><span style="flex: 1 1 300px;">Add a key.</span></div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0 24px;"><span style="font-weight: 600; flex: 0 0 200px;">revoke <em style="font-weight: 400;">age1...</em></span><span style="flex: 1 1 300px;">Remove a key (--yes to remove this device's own key).</span></div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0 24px;"><span style="font-weight: 600; flex: 0 0 200px;">compact</span><span style="flex: 1 1 300px;">Rewrite the vault as one snapshot. Deleted history really leaves the host here.</span></div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0 24px;"><span style="font-weight: 600; flex: 0 0 200px;">upgrade</span><span style="flex: 1 1 300px;">For vaults made with 0.2.x.</span></div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0 24px;"><span style="font-weight: 600; flex: 0 0 200px;">forget --yes</span><span style="flex: 1 1 300px;">Forget what this repository knows about a vault you re-created on purpose. Read its warning first.</span></div>
+        </div>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">ADDING A DEVICE</h2>
+        <p style="margin: 0; padding-left: clamp(0px, 5vw, 56px); max-width: 68ch;">Keys never move between devices. Each device makes its own key, and a device that already reads the vault lets the new one in with enroll. Every other device picks up the new key list on its next fetch. Removal is not erasure: the host may still keep older copies that a removed key can read.</p>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">RECOVERY</h2>
+        <p style="margin: 0; padding-left: clamp(0px, 5vw, 56px); max-width: 68ch;">The encrypted files are ordinary git bundles. With git, age, and your secret key, you can get the history back without this helper.</p>
+        <pre style="margin: 12px 0 0; padding-left: clamp(0px, 5vw, 56px); font: inherit; white-space: pre-wrap; word-break: break-word; color: oklch(0.32 0.06 138);">$ age -d -i key.txt 1-full.bundle.age &gt; full.bundle
+$ git clone --bare full.bundle recovered.git</pre>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">INSTALL</h2>
+        <p style="margin: 0; padding-left: clamp(0px, 5vw, 56px); max-width: 68ch;">Linux and macOS only for now. You need git and age-keygen on PATH. <a href="https://github.com/hibariya/git-remote-sealed/releases">Prebuilt binaries</a> cover Linux (x86_64, aarch64) and Apple Silicon. Or build it yourself:</p>
+        <pre style="margin: 12px 0 0; padding-left: clamp(0px, 5vw, 56px); font: inherit; white-space: pre-wrap; word-break: break-word; color: oklch(0.32 0.06 138);">$ cargo install --git https://github.com/hibariya/git-remote-sealed</pre>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">SEE ALSO</h2>
+        <div style="padding-left: clamp(0px, 5vw, 56px);"><a href="https://github.com/filosottile/age">age(1)</a>, <a href="https://github.com/hibariya/git-remote-sealed/blob/main/docs/OVERVIEW.md">OVERVIEW.md</a>, <a href="https://github.com/hibariya/git-remote-sealed/blob/main/docs/FORMAT.md">FORMAT.md</a>, <a href="https://github.com/hibariya/git-remote-sealed/blob/main/docs/DESIGN-NOTES.md">DESIGN-NOTES.md</a>, <a href="https://github.com/hibariya/git-remote-sealed">github.com/hibariya/git-remote-sealed</a></div>
+      </section>
+      <section>
+        <h2 style="font: inherit; font-weight: 600; margin: 0;">AUTHOR</h2>
+        <div style="padding-left: clamp(0px, 5vw, 56px);"><a href="https://hibariya.org">Hibariya</a></div>
+      </section>
+    </div>
+    <footer style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 24px; margin-top: 64px; color: oklch(0.45 0.01 85);"><span>MIT</span><span>git-remote-sealed.hibariya.org</span><span>GIT-REMOTE-SEALED(1)</span></footer>
+  </main>
+</div>
+<script>
+(() => {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const root = document.getElementById('root'), el = document.getElementById('cipher');
+  let s = 7, text = 'age-encryption.org/v1 -> X25519 ';
+  const grow = (len) => { let out = ''; for (let i = text.length; i < len; i++) { s = (Math.imul(s, 1103515245) + 12345) >>> 0; out += A[(s >>> 16) % 64]; } text += out; };
+  const fill = () => { const need = Math.ceil((root.scrollWidth / 7.2) * (root.scrollHeight / 20) * 1.15); if (need > text.length) { grow(need); el.textContent = text; } };
+  grow(24000); el.textContent = text;
+  new ResizeObserver(fill).observe(root);
+})();
+</script>
+</body>
+</html>
