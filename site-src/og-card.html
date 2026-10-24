@@ -1,0 +1,37 @@
+<!-- Source of site/og.png. Regenerate from the repo root:
+     google-chrome --headless=new --hide-scrollbars --window-size=1200,630 --virtual-time-budget=5000 --screenshot="$PWD/site/og.png" "file://$PWD/site-src/og-card.html" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=block">
+<style>
+html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; background: oklch(0.97 0.003 100); font-family: 'IBM Plex Mono', monospace; }
+#cipher { position: absolute; inset: -4px; font-size: 18px; line-height: 28px; color: oklch(0.82 0.01 138); word-break: break-all; }
+main { position: absolute; left: 110px; top: 72px; width: 880px; height: 486px; box-sizing: border-box; padding: 52px 64px; background: oklch(0.96 0.012 85); color: oklch(0.22 0.01 85); box-shadow: 0 0 0 1px oklch(0.85 0.01 138), 0 24px 60px oklch(0.3 0.03 138 / 0.12); display: flex; flex-direction: column; }
+header, footer { display: flex; justify-content: space-between; font-size: 20px; color: oklch(0.45 0.01 85); }
+.logo { display: flex; align-items: center; gap: 24px; margin-top: 56px; }
+.name { font-size: 42px; font-weight: 600; white-space: nowrap; }
+.desc { margin-top: 40px; font-size: 28px; line-height: 1.55; max-width: 44ch; }
+footer { margin-top: auto; }
+</style>
+</head>
+<body>
+<div id="cipher"></div>
+<main>
+  <header><span>GIT-REMOTE-SEALED(1)</span><span>Git Manual</span></header>
+  <div class="logo">
+    <svg viewBox="0 0 240 64" width="270" height="72"><polygon transform="rotate(-2 120 32)" points="12,10 228,10 234,15 228,20 234,26 228,32 234,38 228,44 234,49 228,54 12,54 6,49 12,44 6,38 12,32 6,26 12,20 6,15" fill="oklch(0.74 0.012 240)"></polygon><text x="120" y="41" text-anchor="middle" transform="rotate(-2 120 32)" font-family="IBM Plex Mono, monospace" font-weight="600" font-size="26" fill="oklch(0.24 0.04 138)">sealed::</text></svg>
+    <span class="name">git-remote-sealed</span>
+  </div>
+  <div class="desc">Encrypt your whole Git repository with age before it reaches the remote.</div>
+  <footer><span>git-remote-sealed.hibariya.org</span><span>MIT</span></footer>
+</main>
+<script>
+const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+let s = 7, t = 'age-encryption.org/v1 -> X25519 ';
+while (t.length < 6000) { s = (Math.imul(s, 1103515245) + 12345) >>> 0; t += A[(s >>> 16) % 64]; }
+document.getElementById('cipher').textContent = t;
+</script>
+</body>
+</html>
